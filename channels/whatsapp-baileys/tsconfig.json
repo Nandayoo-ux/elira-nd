@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@deepseek-ai/*": [
+        "../../.runtime/deepseek-harness/packages/*",
+        "../../.runtime/deepseek-harness/packages/api/*/src",
+        "../../.runtime/deepseek-harness/packages/core/*/src",
+        "../../.runtime/deepseek-harness/packages/host/*/src"
+      ]
+    }
+  },
+  "include": ["plugin.ts"]
+}

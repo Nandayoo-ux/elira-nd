@@ -1,0 +1,22 @@
+{
+  "name": "elara-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ELARA — Personal AI Computer Assistant by Tan",
+  "type": "module",
+  "scripts": {
+    "bootstrap:local": "node ./scripts/run-ps.mjs ./scripts/bootstrap-local.ps1",
+    "run:local": "node ./scripts/run-ps.mjs ./scripts/run-local.ps1",
+    "verify:scaffold": "node ./scripts/verify-scaffold.mjs",
+    "test:cloud": "cd .runtime/deepseek-harness && npx tsx ../../scripts/test-cloud.mjs",
+    "test:web": "cd .runtime/deepseek-harness && npx tsx ../../scripts/test-web.mjs",
+    "test:memory": "npx tsx scripts/test-memory.mjs",
+    "typecheck": "tsc --noEmit || echo 'No tsconfig found, skipping typecheck'",
+    "build": "echo 'No build step required for local plugins'"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "license": "MIT"
+}

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ELARA Control Center</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <nav class="sidebar">
+      <div class="brand">ELARA</div>
+      <div class="status-indicator">
+        <span id="conn-status" class="dot red"></span>
+        <span id="conn-text">Disconnected</span>
+      </div>
+      
+      <div class="menu">
+        <a href="#overview" class="active" data-view="overview">Overview</a>
+        <a href="#chat" data-view="chat">Chat</a>
+        <a href="#sessions" data-view="sessions">Sessions</a>
+        <a href="#pc" data-view="pc">PC Health</a>
+        <a href="#projects" data-view="projects">Projects</a>
+        <a href="#tools" data-view="tools">Tools</a>
+        <a href="#activity" data-view="activity">Activity</a>
+        <a href="#logs" data-view="logs">Logs</a>
+        <a href="#settings" data-view="settings">Settings</a>
+      </div>
+    </nav>
+
+    <main class="content">
+      <div id="view-overview" class="view active">
+        <header><h2>Overview</h2></header>
+        <div class="grid">
+          <div class="card">
+            <h3>Runtime Status</h3>
+            <div id="overview-runtime" class="data-group">Loading...</div>
+          </div>
+          <div class="card">
+            <h3>PC Health</h3>
+            <div id="overview-pc" class="data-group">Loading...</div>
+          </div>
+          <div class="card">
+            <h3>Active Sessions</h3>
+            <div id="overview-sessions" class="data-group">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="view-chat" class="view">
+        <header><h2>Chat Console</h2></header>
+        <div class="chat-container">
+          <div id="chat-messages" class="messages"></div>
+          <div class="chat-input-area">
+            <input type="text" id="chat-session-id" placeholder="Session ID (e.g. whatsapp:user@s.whatsapp.net)">
+            <input type="text" id="chat-input" placeholder="Type a message to ELARA...">
+            <button id="chat-send">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="view-sessions" class="view">
+        <header><h2>Sessions</h2></header>
+        <div class="card">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>Provider</th>
+                <th>Model</th>
+              </tr>
+            </thead>
+            <tbody id="sessions-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="view-pc" class="view">
+        <header><h2>PC Health & Status</h2></header>
+        <div class="card">
+          <div id="pc-details" class="data-group">Loading...</div>
+        </div>
+      </div>
+
+      <div id="view-projects" class="view">
+        <header><h2>Projects</h2></header>
+        <div class="card">
+          <h3>Workspace Actions</h3>
+          <div class="actions">
+            <button class="btn-action" data-action="typecheck">Run Typecheck</button>
+            <button class="btn-action" data-action="test">Run Tests</button>
+            <button class="btn-action" data-action="build">Run Build</button>
+          </div>
+          <div id="project-output" class="console-output"></div>
+        </div>
+      </div>
+
+      <div id="view-tools" class="view">
+        <header><h2>Tools Registry</h2></header>
+        <div class="card">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody id="tools-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="view-activity" class="view">
+        <header><h2>Activity Timeline</h2></header>
+        <div class="card">
+          <div id="activity-timeline" class="timeline"></div>
+        </div>
+      </div>
+
+      <div id="view-logs" class="view">
+        <header><h2>Event Logs</h2></header>
+        <div class="card">
+          <div id="logs-container" class="console-output"></div>
+        </div>
+      </div>
+
+      <div id="view-settings" class="view">
+        <header><h2>Settings</h2></header>
+        <div class="card">
+          <div class="form-group">
+            <label>Dashboard Token</label>
+            <input type="password" id="settings-token" placeholder="Enter token from .runtime/dashboard-token.txt">
+            <button id="save-settings">Save</button>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
