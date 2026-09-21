@@ -1,0 +1,24 @@
+# Generated into profiles/local/cordis.patch.yml by scripts/bootstrap-local.ps1.
+- insert:
+    - id: elara-access
+      name: '__ELARA_ACCESS_PLUGIN_PATH__'
+    - id: elara-core
+      name: '__ELARA_CORE_PLUGIN_PATH__'
+    - id: elara-memory
+      name: '__ELARA_MEMORY_PLUGIN_PATH__'
+    - id: elara-windows-tools
+      name: '__ELARA_WINDOWS_PLUGIN_PATH__'
+    - id: whatsapp-baileys
+      name: '__ELARA_WHATSAPP_PLUGIN_PATH__'
+    - id: dashboard-api
+      name: '__ELARA_DASHBOARD_PLUGIN_PATH__'
+    - id: companion-api
+      name: '__ELARA_COMPANION_PLUGIN_PATH__'
+- id: web-search-deepseek
+  config:
+    baseURL: 'http://localhost:20128/v1'
+    apiKeyEnv: 'ROUTER9_API_KEY'
+    model: 'deepseek-v4-flash'
+- id: agent-presets
+  config:
+    default: elara

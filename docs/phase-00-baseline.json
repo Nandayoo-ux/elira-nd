@@ -1,0 +1,363 @@
+{
+  "head": "89239581d884ad3eae19a73e5f939315f327d772",
+  "status": [
+    " M .env.example",
+    " M .gitignore",
+    " M README.md",
+    " M apps/dashboard/app.js",
+    " M channels/whatsapp-baileys/README.md",
+    " M channels/whatsapp-baileys/plugin.test.ts",
+    " M channels/whatsapp-baileys/plugin.ts",
+    " M docs/ARCHITECTURE.md",
+    " M package.json",
+    " M plugins/companion-api.ts",
+    " M plugins/dashboard-api.ts",
+    " M plugins/elara-core.ts",
+    " M plugins/elara-memory.ts",
+    " M plugins/windows-tools-local.ts",
+    " M plugins/windows-tools.ts",
+    " M profiles/local/cordis.patch.yml",
+    " M scripts/bootstrap-local.ps1",
+    " M scripts/run-local.ps1",
+    " M scripts/test-memory.mjs",
+    " M scripts/test-persona.mjs",
+    "?? channels/whatsapp-baileys/format.ts",
+    "?? concurrency.test.mjs",
+    "?? plugins/test-presets.ts",
+    "?? profiles/cordis.patch.template.yml",
+    "?? profiles/local/.agent-presets/elara/agent.cordis.yml",
+    "?? profiles/local/.agent-presets/elara/preset.yml",
+    "?? scratch.ts",
+    "?? scripts/test-config.mjs",
+    "?? test-startup.mjs",
+    "?? tsconfig.json"
+  ],
+  "files": [
+    {
+      "file": "channels/whatsapp-baileys/format.ts",
+      "sha256": "3cd66c101fa6592538e852f921ecd22bef606648c1c06c63e4c567b098af1315"
+    },
+    {
+      "file": "concurrency.test.mjs",
+      "sha256": "51d7eeeaba30ad60e906cdee34096cfd90775075232b2951815e4da4689bf7b4"
+    },
+    {
+      "file": "plugins/test-presets.ts",
+      "sha256": "fc00526d557f1206ed828f3a7f544cadcc7dd7a95963d2ff99f8869ad4e3c3e3"
+    },
+    {
+      "file": "profiles/cordis.patch.template.yml",
+      "sha256": "eed50e70b5c0bdaffda379c1d99e8f50ecd81470cf9bc23db9c6d06cd64e1b20"
+    },
+    {
+      "file": "profiles/local/.agent-presets/elara/agent.cordis.yml",
+      "sha256": "8fb2f092be7c75fcfd5afc4d2219d8593040368a652e6e427dffe5faec7f5a3f"
+    },
+    {
+      "file": "profiles/local/.agent-presets/elara/preset.yml",
+      "sha256": "cb7804906c77c71cfbd817fe587f03f5a1c127817d52271ee8a2fd54879c78e7"
+    },
+    {
+      "file": "scratch.ts",
+      "sha256": "498be7b22a920fa73111be3d26686303e90c4f54b78e9d03ca54774c69ca95ee"
+    },
+    {
+      "file": "scripts/test-config.mjs",
+      "sha256": "1f9e62fb078bccc4d7518d77bfde53b3798daddd0133fce13ac562e02fc8b88d"
+    },
+    {
+      "file": "test-startup.mjs",
+      "sha256": "39cc06b8e050c7f6770ae662ebf7841a914685a1b60acfde77758bc5ffc506ea"
+    },
+    {
+      "file": "tsconfig.json",
+      "sha256": "613b0781ea5806b4f433630a8625d1b4fe796a68f6ff73c45cdddfbc640f6bb1"
+    },
+    {
+      "file": ".env.example",
+      "sha256": "a59d0f0893b559ac7338927a2d9b50b13c650c3fb76354b04c0e481f6c2761dd"
+    },
+    {
+      "file": ".gitignore",
+      "sha256": "ec0dcd521415e6a8c8a452210b8279825079ac2046c0e254b0ad4b06c670214d"
+    },
+    {
+      "file": "CONTRIBUTING.md",
+      "sha256": "a8aedc43b4ebff4205bcfe725023d854bb439b814604cd14ffb3f4f186cd20fb"
+    },
+    {
+      "file": "LICENSE",
+      "sha256": "7c6b0d2ea5a4a248cd5300397fb360de291fe2145bcfb63a8db6568edd8b5f65"
+    },
+    {
+      "file": "README.md",
+      "sha256": "b8839ea91b2be0b7fc2754c347cebe21f42d9305a3c9522d04383331f5315431"
+    },
+    {
+      "file": "THIRD_PARTY_NOTICES.md",
+      "sha256": "571c41ac08ab31939daf006f1dca013be56f13982a1db18067cb3cd8d7bba66a"
+    },
+    {
+      "file": "apps/companion/README.md",
+      "sha256": "21eba606de0b3565b70e4701e8e85100c48a91ec7e3527d401b6876a3e46f48c"
+    },
+    {
+      "file": "apps/companion/index.ts",
+      "sha256": "6079db59a651ce5513dca2c77f69fb3407cc97eb932a922909702e4eace79329"
+    },
+    {
+      "file": "apps/dashboard/app.js",
+      "sha256": "8aeaea9529fa2caa1c294f160f564fc1a5833108b21c46b5363647add2ffe6bf"
+    },
+    {
+      "file": "apps/dashboard/index.html",
+      "sha256": "5fc232e04cb81dc7758268086eebf0345fd7765af6d8d6c394939b01304ffe42"
+    },
+    {
+      "file": "apps/dashboard/style.css",
+      "sha256": "6cc5c6ff8a9ab180f656142370523c859d7f635f85ef7dedd89a7321233ff1c2"
+    },
+    {
+      "file": "channels/telegram/README.md",
+      "sha256": "bd02bc00bd9326a07ddf80b7619cf03700ba56adf6ea2bcbe5ffaca3a1ee40ce"
+    },
+    {
+      "file": "channels/whatsapp-baileys/README.md",
+      "sha256": "4e130d884550b5be64601fad7844475152ea46a3c899a6e76cd926a20ba0aa06"
+    },
+    {
+      "file": "channels/whatsapp-baileys/package.json",
+      "sha256": "3c96187fbc8d54e83489ad4bae94a32adf6cd261c335b918f3c2e4e80b99e54d"
+    },
+    {
+      "file": "channels/whatsapp-baileys/plugin.test.ts",
+      "sha256": "d3b11455df79087acbda9de4ee857e04186ee0f1f99503a8b79cfae9428e067c"
+    },
+    {
+      "file": "channels/whatsapp-baileys/plugin.ts",
+      "sha256": "9d479b9ed33753d44c93d9a1c24e8b5ff4c6a4a7a2c772a851e644d2c3bf981c"
+    },
+    {
+      "file": "channels/whatsapp-baileys/pnpm-lock.yaml",
+      "sha256": "48d25c8803854090c30b391aa1c4b17a3daddca9ba531b7f11efb465f0ef5ef8"
+    },
+    {
+      "file": "channels/whatsapp-baileys/pnpm-workspace.yaml",
+      "sha256": "1628e84e73d8f83d4ff869b15e07d255713ebc5f3dac6d2da7d6b301a75ac8cd"
+    },
+    {
+      "file": "channels/whatsapp-baileys/tsconfig.json",
+      "sha256": "66e9ad8116a29f1da3ee319a1e01b487ffc394d76953ba57f612ec88c21148e2"
+    },
+    {
+      "file": "docs/ARCHITECTURE.md",
+      "sha256": "706759e2f756c5c5856d35dbb16ab4dae8e7dedcf12df9bc32ce91c1d83c88a1"
+    },
+    {
+      "file": "docs/PHASE-0.md",
+      "sha256": "22777c224812d852b508acdf938bb144380c5c93c51fdd48d0d802c567bca250"
+    },
+    {
+      "file": "docs/ROADMAP.md",
+      "sha256": "e622ddb10c7f293fb7e8bde8d0a04686d5627fc9f8895404b2987c50640856ba"
+    },
+    {
+      "file": "docs/UPSTREAM.md",
+      "sha256": "f96ec08a4654f3dadbe1a8eebe6ccfbf536c11494ba2c8a1e1d0b51269c97017"
+    },
+    {
+      "file": "elara-regression-report.md",
+      "sha256": "4b6f164feae67ed2df1ec610e1535925050d1acec956fa268558c35ad8ed5662"
+    },
+    {
+      "file": "integrations/9router/README.md",
+      "sha256": "12b80667285bc2f6cefa85b6f61d5dbf64bdea1493cc060c519a85610350c9cb"
+    },
+    {
+      "file": "integrations/deepseek-harness/README.md",
+      "sha256": "f4cc9bb74f0f9598b79d81393545949175257d4287c4d32ae61ad53df00ca23a"
+    },
+    {
+      "file": "package.json",
+      "sha256": "7cf770f2bc096fdc9dcdb6eedc8d00608e67b8a404bc74501a3b4ffbd4812277"
+    },
+    {
+      "file": "plugins/companion-api.ts",
+      "sha256": "bf32903aad26f6a34361b1bcb036a230ae9814f1d5374cc779a6432e21fb0d81"
+    },
+    {
+      "file": "plugins/dashboard-api.ts",
+      "sha256": "4cfb9bc58656b2b6337dd396dbee78bd634d935df51d6ac99f127c5ed8f6284b"
+    },
+    {
+      "file": "plugins/elara-core.ts",
+      "sha256": "452da93bdbabfdcd784d6b8f25896aed4d21b893872cd6091ea67b23e84cb6b5"
+    },
+    {
+      "file": "plugins/elara-memory.ts",
+      "sha256": "62e4eee5c5e2ee0aaa4d10ef431eda2bb211f7c63238b1b1072673aee2046038"
+    },
+    {
+      "file": "plugins/windows-tools-local.ts",
+      "sha256": "4bf46d5c6b438a0c6eaad22ea4fcd4a244d2114af9c64c941c0a302fc8842bac"
+    },
+    {
+      "file": "plugins/windows-tools.ts",
+      "sha256": "ceb74c1ab637df390cb53ed6ebeeefb0aabb3f5b19f127e735d623cb59d61656"
+    },
+    {
+      "file": "pnpm-lock.yaml",
+      "sha256": "17c814b167307942d3609c7b9d916ceddb85839573ab39baa114e30edb132a1a"
+    },
+    {
+      "file": "profiles/local/cordis.patch.yml",
+      "sha256": "8a8fec8f57f1dc231d9a58cd5e4c1b7f093d1214076a9099c37ec291e4ed24e6"
+    },
+    {
+      "file": "scripts/bootstrap-local.ps1",
+      "sha256": "d8c4cc1a2ed8aeca40c410d0646d3f868868fa5592c88746f4292839b5e00849"
+    },
+    {
+      "file": "scripts/run-local.ps1",
+      "sha256": "41d7105a3dbd76505bcfd884526e884e188fbb96ccecf5aa151042e3f8f25880"
+    },
+    {
+      "file": "scripts/run-ps.mjs",
+      "sha256": "35dd5a650e019911dc7abb2acf266ceb01b139f5a629b57da8ea08a616bc5022"
+    },
+    {
+      "file": "scripts/run-regression.mjs",
+      "sha256": "a3f0e057ac6c5b306b3b8812d5a7e5108175bb5473c8842c6fb46d39504f5e63"
+    },
+    {
+      "file": "scripts/test-9router-direct.mjs",
+      "sha256": "d1534be078832f4a3e2d63b41ac72bb7ddf2f3660368414eb387d25b28d942cb"
+    },
+    {
+      "file": "scripts/test-cloud.mjs",
+      "sha256": "cc7286ec82d15a569e85e44580391b201b3e6ebdba75e2207523ca2588a22b98"
+    },
+    {
+      "file": "scripts/test-dashboard.mjs",
+      "sha256": "30193a1864816d3af94cbb1a621fbbbad19e7ff1b51d3b4cd75e8d0216484294"
+    },
+    {
+      "file": "scripts/test-env.mjs",
+      "sha256": "4c03e5859041e286c06d73f31314814485a931f62b7d4a08f13390100b1e6d0e"
+    },
+    {
+      "file": "scripts/test-memory.mjs",
+      "sha256": "525c3138203f93cad6a06ab9d8c8a06eae91e083c60290db19842c0e9d2df746"
+    },
+    {
+      "file": "scripts/test-persona.mjs",
+      "sha256": "b0d2351ade9772d5abf30e8bbe528c22518df82a1d55474cde425b3425afa4a7"
+    },
+    {
+      "file": "scripts/test-typing.mjs",
+      "sha256": "634299a25d25abaf3ded14ea3c436d7ff50d2b9b98f7c71b090597fec5bff1ae"
+    },
+    {
+      "file": "scripts/test-web.mjs",
+      "sha256": "e89b5e50f8ffefa12b0274bb2e240d63bdf0b25ce8f57deb8de253bef7ad8130"
+    },
+    {
+      "file": "scripts/test-windows.mjs",
+      "sha256": "608265b9005ab01a9b28715389ffe98dd40bc96eb1636e3aaaa203ce7341e3a5"
+    },
+    {
+      "file": "scripts/verify-scaffold.mjs",
+      "sha256": "674bb1b018e9450e4fa3e9c8256ae1c17d716272432869d5fd1851d7547a7d10"
+    },
+    {
+      "file": "test-e2e.mjs",
+      "sha256": "cff1af22c24af50ab6685a27a6d70f6d5aed28267bda9626e91178f7f97c37d6"
+    },
+    {
+      "file": "tests/tmp_cloud_test/workspace/sleep.js",
+      "sha256": "915a0a6ffc9274693770652d367c2f361f574622c4a381713b681be5ffb5f2c8"
+    }
+  ],
+  "auditDate": "2026-09-19",
+  "repositoryRoot": "D:/Tan/script/elara-ai",
+  "phase": "PHASE 00 — Audit + Baseline",
+  "phaseStatus": "PARTIAL",
+  "nextPhaseReadiness": "NOT READY — baseline checks unresolved and PHASE 01 prompt unavailable",
+  "instructionSource": {
+    "path": "C:/Users/LENOVO/Downloads/MASTER_PROMPT.md",
+    "sha256": "9855a6ed80b63bcf0daad3336261a542b8efb6395c6550f2bd1f0ae80634e7b8"
+  },
+  "environment": {
+    "platform": "win32",
+    "node": "v24.13.1",
+    "npm": "11.8.0",
+    "declaredPackageManager": "pnpm@11.7.0",
+    "upstreamCommit": "ddefc45fbc7f8e46dd73185e68295696d1297887"
+  },
+  "checks": [
+    {
+      "check": "npm.cmd test",
+      "status": "PASS",
+      "passed": 12,
+      "failed": 0,
+      "note": "ELARA_MEMORY_DB removed from child-shell environment before run; memory fixtures use OS temporary directory."
+    },
+    {
+      "check": "npm.cmd run typecheck",
+      "status": "PASS",
+      "note": "Existing non-strict scoped tsconfig only."
+    },
+    {
+      "check": "npm.cmd run build",
+      "status": "NO_OP",
+      "exitCode": 0,
+      "note": "Only echoes No build step required for local plugins; no compilation or packaging."
+    },
+    {
+      "check": "npm.cmd run verify:scaffold",
+      "status": "FAIL",
+      "exitCode": 1,
+      "note": "Core plugin missing marker: export const inject = ['tools']; actual inject also includes memory."
+    },
+    {
+      "check": "node --check apps/dashboard/app.js",
+      "status": "PASS"
+    },
+    {
+      "check": "PowerShell parser: scripts/bootstrap-local.ps1, scripts/run-local.ps1",
+      "status": "PASS",
+      "errors": 0
+    },
+    {
+      "check": "Isolated filesystem/policy fixtures",
+      "status": "PARTIAL",
+      "passed": 6,
+      "failed": 1,
+      "note": "File write/read, outside read/write rejection, junction rejection, unknown tool rejection, explicit node eval rejection pass. Windows project-build fixture fails spawn EINVAL."
+    },
+    {
+      "check": "Validator-only observations",
+      "status": "FAIL_SAFETY_EXPECTATION",
+      "note": "Node validator accepts external script and --import paths. These arguments were not executed."
+    },
+    {
+      "check": "Isolated dashboard module import via node --import tsx --input-type=module",
+      "status": "FAIL",
+      "note": "ERR_MODULE_NOT_FOUND @deepseek-ai/dsh-llm; full DSH loader startup not tested."
+    },
+    {
+      "check": "Browser UI static preview",
+      "status": "PASS_WITH_LIMITATIONS",
+      "note": "Overview, Projects, Chat, PC Health, Settings render/navigation verified. API deliberately unavailable. No credentials entered or action buttons invoked. Preview stopped."
+    },
+    {
+      "check": "Full live runtime, external channels, destructive cleanup, dependency installation",
+      "status": "NOT_RUN",
+      "note": "Avoid effects on real profiles, messaging, credentials, and system data."
+    },
+    {
+      "check": "Lint",
+      "status": "NOT_CONFIGURED"
+    }
+  ]
+}

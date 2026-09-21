@@ -1,0 +1,24 @@
+{
+  "unit": {
+    "name": "workspace",
+    "version": 2
+  },
+  "global": {
+    "initialized": true,
+    "workspaceIds": [],
+    "archivedSessionIds": [
+      "session-6b935375-852a-4f27-9c29-bf7bb70953d2",
+      "whatsapp:status@broadcast",
+      "whatsapp:12345678@s.whatsapp.net",
+      "whatsapp:userC@s.whatsapp.net",
+      "whatsapp:userB@s.whatsapp.net",
+      "whatsapp:userA@s.whatsapp.net",
+      "whatsapp:1234567890@s.whatsapp.net",
+      "whatsapp:198454030684321@lid",
+      "whatsapp:261370486456560@lid"
+    ]
+  },
+  "tables": {
+    "workspaces": {}
+  }
+}

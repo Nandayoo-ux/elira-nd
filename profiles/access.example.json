@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "elara-p2a-v1.1",
+  "devices": [
+    { "id": "local-windows", "kind": "local", "enabled": true },
+    { "id": "companion-example", "kind": "companion", "enabled": false }
+  ],
+  "principals": [
+    {
+      "id": "local-operator",
+      "role": "operator",
+      "enabled": true,
+      "channelAliases": {
+        "dashboard": ["local-dashboard"]
+      },
+      "allowedDeviceIds": ["local-windows"]
+    },
+    {
+      "id": "whatsapp-user-example",
+      "role": "user",
+      "enabled": false,
+      "channelAliases": {
+        "whatsapp": ["REPLACE_WITH_EXACT_JID@s.whatsapp.net"]
+      },
+      "allowedDeviceIds": ["local-windows"]
+    }
+  ],
+  "authorities": {
+    "dashboardPrincipalId": "local-operator",
+    "hostDeviceId": "local-windows",
+    "channelDefaultDeviceIds": {
+      "whatsapp": "local-windows",
+      "dashboard": "local-windows"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+llm-pi-ai:
+  providers:
+    router9:
+      displayName: Router
+      apiKeyEnv: ROUTER9_API_KEY
+      api: openai-completions
+      baseURL: http://localhost:20128/v1
+      models:
+        - id: grip/gpt-5.6-luna
+          name: grip/gpt-5.6-luna
+          contextWindow: 400000
+        - id: groq/openai/gpt-oss-120b
+          name: groq/openai/gpt-oss-120b
+          contextWindow: 128000
+        - id: ag/gemini-3.6-flash-low
+          name: ag/gemini-3.6-flash-low
+          contextWindow: 1048576
+        - id: gemini/gemini-3.5-flash-lite
+          name: gemini/gemini-3.5-flash-lite
+          contextWindow: 1048576
+        - id: ag/gemini-3.7-flash-medium
+          name: ag/gemini-3.7-flash-medium
+          contextWindow: 1048576
+        - id: ag/gemini-3.7-flash-low
+          name: ag/gemini-3.7-flash-low
+          contextWindow: 1048576
+        - id: ag/gemini-3.6-flash-medium
+          name: ag/gemini-3.6-flash-medium
+          contextWindow: 1048576
+agent-default-model:
+  provider: router9
+  model: ag/gemini-3.6-flash-medium
+permission:
+  defaultPreset: danger-full-access
+locale:
+  preference: en
+ui-theme:
+  preference: dark
+ui-chat:
+  transcriptView: normal

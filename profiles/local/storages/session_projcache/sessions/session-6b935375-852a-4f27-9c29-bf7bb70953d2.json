@@ -1,0 +1,299 @@
+{
+  "version": 7,
+  "record": {
+    "identity": {
+      "formatVersion": 3,
+      "createdAt": 1789819498727,
+      "cwd": "D:\\Tan\\script\\elara-ai",
+      "isSeeded": true,
+      "inheritedEventCount": 49
+    },
+    "rows": {
+      "title": {
+        "ver": 1,
+        "seq": 50,
+        "val": "Pemeriksaan Lampiran Video WhatsApp (1)"
+      },
+      "titleInput": {
+        "ver": 3,
+        "seq": 50,
+        "val": {
+          "first": {
+            "seq": 11,
+            "text": "Tolong periksa lampiran whatsapp-video.mp4"
+          },
+          "count": 3,
+          "lastSeq": 44
+        }
+      },
+      "llmRetry": {
+        "ver": 1,
+        "seq": 50,
+        "val": {}
+      },
+      "sandboxMode": {
+        "ver": 1,
+        "seq": 50,
+        "val": "danger-full-access"
+      },
+      "goal": {
+        "ver": 6,
+        "seq": 50,
+        "val": {
+          "current": null,
+          "seenGoalIds": [],
+          "failure": null
+        }
+      },
+      "subagentCatalog": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "inheritedEventCount": 49
+        }
+      },
+      "subagentTiming": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "descriptorSeen": false,
+          "settledMs": 0
+        }
+      },
+      "subagent": {
+        "ver": 2,
+        "seq": 50,
+        "val": {}
+      },
+      "tokenUsage": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "totals": {
+            "uncachedInputTokens": 63310,
+            "outputTokens": 1502,
+            "cacheReadTokens": 7838,
+            "cacheWriteTokens": 0
+          },
+          "last": {
+            "turn": 3,
+            "step": 1,
+            "buckets": {
+              "uncachedInputTokens": 23937,
+              "outputTokens": 68,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            }
+          }
+        }
+      },
+      "contextPressure": {
+        "ver": 5,
+        "seq": 50,
+        "val": {
+          "surfaceTokens": 16214,
+          "contextWindow": 1048576,
+          "pressureTokens": 23937,
+          "sampledSurfaceTokens": 16163
+        }
+      },
+      "contextBreakdown": {
+        "ver": 5,
+        "seq": 50,
+        "val": {
+          "nodes": [
+            {
+              "seq": 9,
+              "heuristicTokens": 4545,
+              "system": true
+            },
+            {
+              "seq": 10,
+              "heuristicTokens": 106,
+              "system": false
+            },
+            {
+              "seq": 11,
+              "heuristicTokens": 64,
+              "system": false
+            },
+            {
+              "seq": 12,
+              "heuristicTokens": 106,
+              "system": false
+            },
+            {
+              "seq": 13,
+              "heuristicTokens": 10679,
+              "system": false
+            },
+            {
+              "seq": 19,
+              "heuristicTokens": 197,
+              "system": false
+            },
+            {
+              "seq": 30,
+              "heuristicTokens": 106,
+              "system": false
+            },
+            {
+              "seq": 31,
+              "heuristicTokens": 69,
+              "system": false
+            },
+            {
+              "seq": 33,
+              "heuristicTokens": 116,
+              "system": false
+            },
+            {
+              "seq": 43,
+              "heuristicTokens": 106,
+              "system": false
+            },
+            {
+              "seq": 44,
+              "heuristicTokens": 69,
+              "system": false
+            },
+            {
+              "seq": 45,
+              "heuristicTokens": 51,
+              "system": false
+            }
+          ],
+          "breakdown": {
+            "systemTokens": 4545,
+            "toolsTokens": 7229,
+            "messageTokens": 11669
+          }
+        }
+      },
+      "turnOutline": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "turns": [
+            {
+              "turn": 1,
+              "seq": 5,
+              "prompt": "Tolong periksa lampiran whatsapp-video.mp4",
+              "response": ""
+            },
+            {
+              "turn": 2,
+              "seq": 26,
+              "prompt": "Awww 💖😳",
+              "response": ""
+            },
+            {
+              "turn": 3,
+              "seq": 39,
+              "prompt": "Duluan gusy",
+              "response": ""
+            }
+          ],
+          "draft": ""
+        }
+      },
+      "agentPreset": {
+        "ver": 1,
+        "seq": 50,
+        "val": "elara"
+      },
+      "turnBoundary": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "openTurnStartSeq": null,
+          "lastStepStartSeq": 42,
+          "lastStepBoundary": {
+            "kind": "end",
+            "seq": 47
+          },
+          "lastTurn": 3
+        }
+      },
+      "inbox": {
+        "ver": 1,
+        "seq": 50,
+        "val": {
+          "next-turn": [],
+          "next-step": []
+        }
+      },
+      "sessionStats": {
+        "ver": 1,
+        "seq": 50,
+        "val": {
+          "turns": 3,
+          "steps": 3,
+          "llmMs": 38460,
+          "toolMs": 0,
+          "ttftMs": 37898,
+          "ttftSteps": 3,
+          "decodeMs": 562,
+          "decodeTokens": 1502,
+          "lastTurn": 3,
+          "openStep": null,
+          "pendingCalls": {}
+        }
+      },
+      "permissions": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "preset": "danger-full-access",
+          "sandbox": "danger-full-access",
+          "approval": "never",
+          "seeded": true
+        }
+      },
+      "modelSelection": {
+        "ver": 2,
+        "seq": 50,
+        "val": {
+          "lastUsed": {
+            "provider": "router9",
+            "model": "ag/gemini-3.6-flash-medium"
+          },
+          "pending": null
+        }
+      },
+      "sessionListMetadata": {
+        "ver": 1,
+        "seq": 50,
+        "val": {
+          "blank": false,
+          "lastPromptAt": 1789814437935
+        }
+      },
+      "imageLimits": {
+        "ver": 1,
+        "seq": 50,
+        "val": null
+      },
+      "todos": {
+        "ver": 2,
+        "seq": 50,
+        "val": null
+      },
+      "plan": {
+        "ver": 3,
+        "seq": 50,
+        "val": {
+          "active": false,
+          "wanted": null,
+          "running": null,
+          "activeAtLastHeader": false
+        }
+      },
+      "subagentModelSelectionPolicy": {
+        "ver": 1,
+        "seq": 50,
+        "val": null
+      }
+    }
+  }
+}
