@@ -6,6 +6,16 @@ export type PrincipalRole = 'operator' | 'user'
 export type DeviceKind = 'local' | 'companion'
 export type Risk = 'read_only' | 'sensitive' | 'destructive' | 'unknown'
 export type PolicyOutcome = 'allow' | 'deny' | 'approval_required'
+export interface TrustedSessionContext { principalId: string; originChannel: OriginChannel }
+export type StopOutcome = 'stopping' | 'stopped' | 'idle' | 'unconfirmed'
+export interface StopStatus {
+  id: string
+  sessionId: string
+  outcome: StopOutcome
+  requestedAt: number
+  settledAt?: number
+}
+export interface SessionAdmission { sessionId: string; generation: number; operationId: string }
 export type ExecutionLocation = 'host' | 'routed_device' | 'control_plane'
 
 export interface Principal {

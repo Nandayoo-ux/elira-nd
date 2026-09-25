@@ -32,7 +32,7 @@ Laptop UI           ┘                           │
 
 ## Current status
 
-The repository contains P2B one-time approvals for reviewed host actions. The existing `profiles/local/cordis.patch.yml` must be updated to load `elara-access`, and the private access configuration must include `authorities.hostDeviceId` before the local runtime can use them. Bootstrap now refuses an existing patch that omits the access plugin. No upstream DSH source is vendored; the pinned runtime is cloned into ignored `.runtime/` during local bootstrap.
+The repository contains P2B one-time approvals and P2C session-scoped cancellation with a redacted audit trail. The existing `profiles/local/cordis.patch.yml` must load `elara-access` and `elara-control`, and the private access configuration must include `authorities.hostDeviceId` before the local runtime can use them. Bootstrap adds the control plugin to an existing access-enabled patch. No upstream DSH source is vendored; the pinned runtime is cloned into ignored `.runtime/` during local bootstrap.
 
 ## Prerequisites
 
@@ -94,3 +94,11 @@ An approved shell or code command has broad host access during that one invocati
 WhatsApp keeps voice-note transcription, quoted-message context, adaptive typing, explicit session reset, and its memory commands behind exact sender authorization. Memory rows are scoped by the configured principal ID. Older rows without trustworthy ownership remain preserved under a reserved, inaccessible owner; they are never assigned to a guessed user. The model-facing `elara_store_memory` tool remains denied by P2A until a separate policy review authorizes it.
 
 Run `npm test` for baseline, access, approval, and adapter coverage; run `npm run verify` for the consolidated gate including type, scaffold, Windows command, and dashboard checks. Runtime tests use synthetic profiles and data, and do not activate the existing local profile.
+
+## P2C stop and audit
+
+Send `.stop` from a configured WhatsApp identity to stop its current session. In the dashboard Sessions view, use **Stop** and watch the request status. `stopping` is a request in progress; `stopped` is confirmed settlement; `idle` means no live agent or direct operation was active; `unconfirmed` means termination could not be verified. The dashboard **Audit** button shows redacted, paginated history for the authorized session. The HTTP equivalents are `POST /api/sessions/:id/stop`, `GET /api/stops/:id`, and `GET /api/sessions/:id/audit` with the existing bearer token.
+
+P2C uses DSH agents and does not schedule or replay work. Its generation fence drops older queued messages, stops pending approvals, and blocks stale grants. Direct WhatsApp and dashboard status operations carry the same session generation and cancellation signal; their results are fenced before reply delivery. Local subprocesses receive cancellation; project command trees are targeted by their owned PID on Windows and verified before a stopped result is claimed. Aborting a companion status wait does not prove that remote work stopped. Audit rows are added to the existing control database without removing bindings or policy records. Rollback should reverse P2C code and plugin registration only and retain the database.
+
+`npm run test:control` runs focused offline control and audit tests. `npm run verify:p2b` remains the full compatibility gate. These offline checks do not establish live readiness for a real WhatsApp account, user profile, companion, or unsandboxed project command.

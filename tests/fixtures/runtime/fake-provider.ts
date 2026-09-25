@@ -3,6 +3,16 @@ import * as fs from 'node:fs'
 export const name = 'elara-runtime-fixture-provider'
 export const inject = ['llm']
 
+const blocks = new Map<string, { entered: () => void; release: Promise<void> }>()
+export function blockResponse(text: string) {
+  let entered!: () => void
+  let release!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const pending = new Promise<void>(resolve => { release = resolve })
+  blocks.set(text, { entered, release: pending })
+  return { started, release: () => { release(); blocks.delete(text) } }
+}
+
 class FixtureAdapter {
   providerInfo(provider) {
     return { id: provider, name: 'ELARA fixture provider' }
@@ -25,10 +35,10 @@ class FixtureAdapter {
   }
 
   async prepareCall(provider, model, signal) {
-    return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) }
+    return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options, signal) }
   }
 
-  async * stream(options) {
+  async * stream(options, signal) {
     const personaCount = [...options.messages]
       .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text))
       .join('\n').match(/You are ELARA/g)?.length || 0
@@ -36,6 +46,17 @@ class FixtureAdapter {
       .find(message => message.role === 'user' && message.source.kind === 'user')
       ?.content.filter(block => block.type === 'text').map(block => block.text).join('') || ''
     const response = `fixture:${text}`
+    const block = blocks.get(text)
+    if (block) {
+      block.entered()
+      await new Promise<void>(resolve => {
+        const done = () => { signal?.removeEventListener('abort', done); resolve() }
+        signal?.addEventListener('abort', done, { once: true })
+        void block.release.then(done)
+        if (signal?.aborted) done()
+      })
+      if (signal?.aborted) return
+    }
     const logPath = process.env.ELARA_RUNTIME_REQUEST_LOG
     if (logPath) {
       fs.appendFileSync(logPath, `${JSON.stringify({ text, messageCount: options.messages.length, personaCount })}\n`, 'utf8')

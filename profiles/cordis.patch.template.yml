@@ -2,6 +2,8 @@
 - insert:
     - id: elara-access
       name: '__ELARA_ACCESS_PLUGIN_PATH__'
+    - id: elara-control
+      name: '__ELARA_CONTROL_PLUGIN_PATH__'
     - id: elara-core
       name: '__ELARA_CORE_PLUGIN_PATH__'
     - id: elara-memory
@@ -22,3 +24,6 @@
 - id: agent-presets
   config:
     default: elara
+    roots:
+      - path: '__ELARA_PRESET_ROOT__'
+        trust: system

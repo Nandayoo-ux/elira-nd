@@ -5,6 +5,7 @@ import fs from 'node:fs'
 const template = fs.readFileSync(new URL('../profiles/cordis.patch.template.yml', import.meta.url), 'utf8')
 const plugins = [
   ['elara-access', '__ELARA_ACCESS_PLUGIN_PATH__'],
+  ['elara-control', '__ELARA_CONTROL_PLUGIN_PATH__'],
   ['elara-core', '__ELARA_CORE_PLUGIN_PATH__'],
   ['elara-memory', '__ELARA_MEMORY_PLUGIN_PATH__'],
   ['elara-windows-tools', '__ELARA_WINDOWS_PLUGIN_PATH__'],
@@ -19,6 +20,7 @@ function assertPatchShape(contents) {
   assert.match(contents, /^- id: web-search-deepseek$/m)
   assert.match(contents, /^- id: agent-presets$/m)
   assert.match(contents, /^\s+default: elara$/m)
+  assert.match(contents, /^\s+- path: '__ELARA_PRESET_ROOT__'$/m)
   assert.match(contents, /^\s+apiKeyEnv: 'ROUTER9_API_KEY'$/m)
 }
 
@@ -36,6 +38,7 @@ test('synthetic path substitution retains exactly one access plugin', () => {
   for (const [id, placeholder] of plugins) {
     generated = generated.replace(placeholder, `C:/synthetic-fixture/${id}.ts`)
   }
+  generated = generated.replace('__ELARA_PRESET_ROOT__', 'C:/synthetic-fixture/presets')
   assertPatchShape(generated)
   assert.doesNotMatch(generated, /__ELARA_[A-Z_]+__/)
   assert.equal((generated.match(/^    - id: elara-access$/gm) || []).length, 1)

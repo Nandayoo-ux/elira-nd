@@ -21,6 +21,7 @@ import {
   evaluatePolicy,
 } from '../packages/policy/evaluate.ts'
 import { AccessStore } from '../packages/policy/store.ts'
+import { auditId, type AuditRecord } from '../packages/policy/audit.ts'
 
 export const name = 'elara-access'
 export const inject = ['tools', 'agents', 'approval']
@@ -50,6 +51,15 @@ export interface AccessService {
   pendingApprovals(principalId: string, channel: OriginChannel): PendingApproval[]
   answerApproval(id: string, principalId: string, channel: OriginChannel, allow: boolean): boolean
   onApproval(listener: (view: PendingApproval) => void | Promise<void>): () => void
+  cancelSessionApprovals(sessionIds: readonly string[]): void
+  revokeSessionGrants(sessionIds: readonly string[], stopRequestId?: string): void
+  recordAudit(record: AuditRecord): number
+  listAudit(principalId: string, channel: OriginChannel, sessionId: string, cursor?: number, limit?: number): AuditRecord[]
+  stopStatus(id: string): { status: import('../packages/policy/contracts.ts').StopStatus; principalId: string; originChannel: OriginChannel } | undefined
+  latestStopStatus(sessionId: string): import('../packages/policy/contracts.ts').StopStatus | undefined
+  auditHealthy(): boolean
+  setStopGuard(guard: (agent: Agent | undefined) => void): void
+  setScopeResolver(resolve: (agent: Agent | undefined) => string | undefined): void
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -68,9 +78,35 @@ export function apply(ctx: Context) {
   const dbPath = path.resolve(process.env.ELARA_CONTROL_DB?.trim() || path.join(rootDir, '.runtime', 'elara-control.db'))
   const store = new AccessStore(dbPath)
   const inbox = new ApprovalInbox()
+  inbox.subscribe(view => {
+    try { store.recordAudit({ schemaVersion: 1, operationId: view.operationId ?? view.id, approvalId: view.id,
+      principalId: view.principalId, sessionId: view.scopeSessionId ?? view.sessionId, originChannel: view.originChannel,
+      targetDeviceId: view.targetDeviceId, toolName: view.toolName,
+      eventType: 'approval_requested', reasonCode: 'APPROVAL_REQUIRED', outcome: 'requested', createdAt: Date.now() }) }
+    catch { auditDegraded = true; throw new Error('AUDIT_UNAVAILABLE') }
+  })
+  inbox.onSettled((view, answer) => {
+    try { store.recordAudit({ schemaVersion: 1, operationId: view.operationId ?? view.id, approvalId: view.id,
+      principalId: view.principalId, sessionId: view.scopeSessionId ?? view.sessionId, originChannel: view.originChannel,
+      targetDeviceId: view.targetDeviceId, toolName: view.toolName,
+      eventType: 'approval_resolved', reasonCode: answer === 'allowed-once' ? 'APPROVAL_ALLOWED' :
+        answer === 'rejected' ? 'APPROVAL_REJECTED' : answer === 'expired' ? 'APPROVAL_EXPIRED'
+          : answer === 'cancelled' ? 'APPROVAL_CANCELLED' : 'APPROVAL_UNAVAILABLE',
+      outcome: answer === 'allowed-once' ? 'allowed' : answer === 'rejected' ? 'rejected' :
+        answer === 'cancelled' ? 'cancelled' : answer === 'expired' ? 'expired' : 'unknown', createdAt: Date.now() }) }
+    catch { auditDegraded = true; console.error('[ELARA-AUDIT] durable write failed') }
+  })
   const grants = new Map<ToolExecution['token'], string>()
   const ownRequests = new WeakMap<ApprovalRequest, { exec: Readonly<ToolExecution>, accepted: boolean }>()
   const liveExecutions = new Map<ToolExecution['token'], Readonly<ToolExecution>>()
+  const trackedExecutions = new Map<ToolExecution['token'], Readonly<ToolExecution>>()
+  const staleExecutions = new Set<ToolExecution['token']>()
+  const stopForExecution = new Map<ToolExecution['token'], string>()
+  const executionAudit = new Map<ToolExecution['token'], { executionId: string; operationId: string; startedAt: number; binding: SessionBinding; toolName: string; capabilityId: string }>()
+  const correlation = new Map<ToolExecution['token'], { operationId: string; executionId: string }>()
+  let auditDegraded = false
+  let stopGuard: (agent: Agent | undefined) => void = () => undefined
+  let scopeForAgent: (agent: Agent | undefined) => string | undefined = agent => agent ? String(agent.id) : undefined
   const aliasIndex = new Map<string, Principal>()
   for (const principal of state.config?.principals ?? []) {
     for (const [channel, aliases] of Object.entries(principal.channelAliases)) {
@@ -108,8 +144,8 @@ export function apply(ctx: Context) {
     return state.config?.authorities.channelDefaultDeviceIds[binding.originChannel] || 'unconfigured'
   }
 
-  function record(context: ExecutionContext, decision: PolicyDecision): void {
-    store.record({
+  function record(context: ExecutionContext, decision: PolicyDecision, operationId = auditId(), auditSessionId = context.sessionId): void {
+    try { store.record({
       principalId: context.principalId || 'unbound',
       sessionId: context.sessionId || 'unbound',
       capabilityId: decision.capability.id,
@@ -119,7 +155,19 @@ export function apply(ctx: Context) {
       policyVersion: decision.policyVersion,
       source: context.source.slice(0, 96),
       createdAt: Date.now(),
-    })
+    }) } catch {
+      auditDegraded = true
+      console.error('[ELARA-AUDIT] durable write failed')
+      throw new Error('AUDIT_UNAVAILABLE')
+    }
+    try {
+      store.recordAudit({ schemaVersion: 1, operationId, principalId: context.principalId || 'unbound',
+        sessionId: auditSessionId || 'unbound', originChannel: store.bindingFor(context.sessionId)?.originChannel
+          || bindingForAgent(ctx.agents.get(context.sessionId as any))?.originChannel || 'dashboard',
+        targetDeviceId: context.targetDeviceId || undefined, capabilityId: decision.capability.id,
+        policyVersion: decision.policyVersion, eventType: 'policy_decision', reasonCode: decision.reasonCode,
+        outcome: decision.outcome === 'allow' ? 'allowed' : 'denied', createdAt: Date.now() })
+    } catch { auditDegraded = true; console.error('[ELARA-AUDIT] durable write failed') }
   }
 
   function decisionForTool(exec: Readonly<ToolExecution>, shouldRecord: boolean): PolicyDecision {
@@ -151,7 +199,7 @@ export function apply(ctx: Context) {
       signal: exec.signal,
     }
     const decision = evaluatePolicy(state.config, context, capability, binding?.principalId)
-    if (shouldRecord) record(context, decision)
+    if (shouldRecord) record(context, decision, correlation.get(exec.token)?.operationId, scopeForAgent(exec.agent))
     return decision
   }
 
@@ -165,7 +213,7 @@ export function apply(ctx: Context) {
     const decision = decisionForTool(exec, false)
     const binding = bindingForAgent(exec.agent)
     const principal = principalForAgent(exec.agent)
-    if (exec.signal.aborted || !binding || !principal || !approvableTools.has(exec.name)
+    if (exec.signal.aborted || staleExecutions.has(exec.token) || !binding || !principal || !approvableTools.has(exec.name)
       || decision.outcome !== 'approval_required'
       || targetFor(binding) !== state.config?.authorities.hostDeviceId
       || process.env.ELARA_MODE === 'cloud') return undefined
@@ -189,6 +237,7 @@ export function apply(ctx: Context) {
     // Never ask for an action whose full preview cannot be delivered.
     if (details.length > 6000) return 'unavailable'
     const result = await inbox.ask({ principalId: binding.principalId,
+      operationId: correlation.get(exec.token)?.operationId, scopeSessionId: scopeForAgent(exec.agent),
       originChannel: binding.originChannel, sessionId: String(exec.agent!.id),
       targetDeviceId: targetFor(binding), toolName: exec.name, details }, request.signal ?? exec.signal)
     if (result === 'allowed-once' && approvalScope(exec) !== scope) return 'cancelled'
@@ -248,7 +297,10 @@ export function apply(ctx: Context) {
       return decision
     },
     async executeDirect(request, operation) {
-      const initial = service.decideDirect(request)
+      const operationId = auditId()
+      const binding = store.bindingFor(request.sessionId)
+      const initial = evaluatePolicy(state.config, request, capabilityById(request.capabilityId), binding?.principalId)
+      record(request, initial, operationId)
       if (initial.outcome !== 'allow') throw new AccessDeniedError(initial)
       if (request.signal?.aborted) throw new Error('ABORTED_BEFORE_DISPATCH')
       const final = evaluatePolicy(
@@ -258,10 +310,40 @@ export function apply(ctx: Context) {
         store.bindingFor(request.sessionId)?.principalId,
       )
       if (final.outcome !== 'allow') {
-        record(request, final)
+        record(request, final, operationId)
         throw new AccessDeniedError(final)
       }
-      return operation()
+      if (initial.capability.risk === 'sensitive' && auditDegraded) throw new Error('AUDIT_UNAVAILABLE')
+      const executionId = auditId()
+      const startedAt = Date.now()
+      if (binding) service.recordAudit({ schemaVersion: 1, operationId, executionId,
+        principalId: binding.principalId, sessionId: binding.sessionId, originChannel: binding.originChannel,
+        targetDeviceId: request.targetDeviceId, capabilityId: request.capabilityId,
+        policyVersion: final.policyVersion, eventType: 'dispatch_started', reasonCode: 'DISPATCH_ALLOWED',
+        outcome: 'requested', createdAt: startedAt })
+      try {
+        const value = await operation()
+        if (request.signal?.aborted) throw new Error('EXECUTION_CANCELLED')
+        if (binding) service.recordAudit({ schemaVersion: 1, operationId, executionId,
+          principalId: binding.principalId, sessionId: binding.sessionId, originChannel: binding.originChannel,
+          targetDeviceId: request.targetDeviceId, capabilityId: request.capabilityId,
+          policyVersion: final.policyVersion, eventType: 'execution_settled', reasonCode: 'EXECUTION_COMPLETED',
+          outcome: 'completed', createdAt: Date.now(), durationMs: Date.now() - startedAt })
+        return value
+      } catch (error) {
+        if (binding) try { service.recordAudit({ schemaVersion: 1, operationId, executionId,
+          principalId: binding.principalId, sessionId: binding.sessionId, originChannel: binding.originChannel,
+          targetDeviceId: request.targetDeviceId, capabilityId: request.capabilityId,
+          policyVersion: final.policyVersion, eventType: 'execution_settled',
+          reasonCode: request.signal?.aborted && final.capability.executionLocation === 'routed_device'
+            && service.deviceKind(request.targetDeviceId) === 'companion' ? 'REMOTE_EXECUTION_UNCONFIRMED'
+            : request.signal?.aborted ? 'EXECUTION_CANCELLED' : 'EXECUTION_FAILED',
+          outcome: request.signal?.aborted && final.capability.executionLocation === 'routed_device'
+            && service.deviceKind(request.targetDeviceId) === 'companion' ? 'unknown'
+            : request.signal?.aborted ? 'cancelled' : 'failed',
+          createdAt: Date.now(), durationMs: Date.now() - startedAt }) } catch { /* degraded */ }
+        throw error
+      }
     },
     pendingApprovals(principalId, channel) {
       const principal = state.config?.principals.find(item => item.id === principalId && item.enabled)
@@ -272,6 +354,29 @@ export function apply(ctx: Context) {
       return !!principal && inbox.answer(id, principalId, channel, allow)
     },
     onApproval(listener) { return inbox.subscribe(listener) },
+    cancelSessionApprovals(sessionIds) { for (const id of sessionIds) inbox.cancelSession(id) },
+    revokeSessionGrants(sessionIds, stopRequestId) {
+      const scope = new Set(sessionIds)
+      for (const [token, exec] of trackedExecutions) {
+        if (exec.agent && scope.has(String(exec.agent.id))) {
+          staleExecutions.add(token)
+          if (stopRequestId) stopForExecution.set(token, stopRequestId)
+        }
+      }
+      for (const [token, exec] of liveExecutions) {
+        if (exec.agent && scope.has(String(exec.agent.id))) { grants.delete(token); liveExecutions.delete(token) }
+      }
+    },
+    recordAudit(record) {
+      try { return store.recordAudit(record) }
+      catch { auditDegraded = true; console.error('[ELARA-AUDIT] durable write failed'); throw new Error('AUDIT_UNAVAILABLE') }
+    },
+    listAudit(principalId, channel, sessionId, cursor, limit) { return store.listAudit(principalId, channel, sessionId, cursor, limit) },
+    stopStatus(id) { return store.stopStatus(id) },
+    latestStopStatus(sessionId) { return store.latestStopStatus(sessionId) },
+    auditHealthy() { return !auditDegraded },
+    setStopGuard(guard) { stopGuard = guard },
+    setScopeResolver(resolve) { scopeForAgent = resolve },
   }
 
   ctx.provide('access', service)
@@ -289,7 +394,14 @@ export function apply(ctx: Context) {
     return undefined
   })
   ctx.on('tools/pre-execute', async (exec: ToolExecution, next: () => Promise<any>) => {
+    correlation.set(exec.token, { operationId: auditId(), executionId: auditId() })
+    trackedExecutions.set(exec.token, exec)
+    try { stopGuard(exec.agent) }
+    catch { return { kind: 'deny' as const, reason: 'ELARA access denied (SESSION_STOPPING)' } }
     const decision = decisionForTool(exec, true)
+    if (decision.capability.risk === 'sensitive' && auditDegraded) {
+      return { kind: 'deny' as const, reason: 'ELARA access denied (AUDIT_UNAVAILABLE)' }
+    }
     if (decision.outcome === 'allow') return next()
     const scope = approvalScope(exec)
     if (scope && exec.agent) {
@@ -313,19 +425,76 @@ export function apply(ctx: Context) {
     }
     return { kind: 'deny' as const, reason: denialText(decision) }
   })
+  function auditGuardDenial(exec: Readonly<ToolExecution>, reasonCode: string): void {
+    const binding = bindingForAgent(exec.agent)
+    if (!binding) return
+    try { service.recordAudit({ schemaVersion: 1,
+      operationId: correlation.get(exec.token)?.operationId ?? auditId(),
+      principalId: binding.principalId, sessionId: scopeForAgent(exec.agent) ?? binding.sessionId,
+      originChannel: binding.originChannel, capabilityId: capabilityForTool(exec.name, exec.arguments).id,
+      eventType: 'policy_decision', reasonCode, outcome: 'denied', createdAt: Date.now() }) }
+    catch { /* denial still stands */ }
+  }
   ctx.tools.guard(exec => {
+    if (staleExecutions.has(exec.token)) {
+      auditGuardDenial(exec, 'SESSION_STOPPED')
+      return 'ELARA access denied (SESSION_STOPPED)'
+    }
+    try { stopGuard(exec.agent) }
+    catch { auditGuardDenial(exec, 'SESSION_STOPPING'); return 'ELARA access denied (SESSION_STOPPING)' }
     const decision = decisionForTool(exec, false)
     const grant = grants.get(exec.token)
     grants.delete(exec.token)
-    if (grant && approvalScope(exec) === grant) return undefined
-    return decision.outcome === 'allow' ? undefined : denialText(decision)
+    const allowed = (grant && approvalScope(exec) === grant) || decision.outcome === 'allow'
+    const binding = bindingForAgent(exec.agent)
+    if (binding) {
+      try {
+        if (allowed) {
+          if (decision.capability.risk === 'sensitive' && auditDegraded) return 'ELARA access denied (AUDIT_UNAVAILABLE)'
+          const ids = correlation.get(exec.token) ?? { operationId: auditId(), executionId: auditId() }
+          const entry = { ...ids, startedAt: Date.now(), binding,
+            toolName: exec.name, capabilityId: decision.capability.id }
+          service.recordAudit({ schemaVersion: 1, operationId: entry.operationId, executionId: entry.executionId,
+            principalId: binding.principalId, sessionId: scopeForAgent(exec.agent) ?? binding.sessionId, originChannel: binding.originChannel,
+            toolName: /^[a-zA-Z0-9_.:@-]+$/.test(exec.name) ? exec.name : undefined,
+            capabilityId: entry.capabilityId, policyVersion: decision.policyVersion,
+            eventType: 'dispatch_started', reasonCode: 'DISPATCH_ALLOWED', outcome: 'requested', createdAt: entry.startedAt })
+          executionAudit.set(exec.token, entry)
+        } else {
+          service.recordAudit({ schemaVersion: 1, operationId: correlation.get(exec.token)?.operationId ?? auditId(), principalId: binding.principalId,
+            sessionId: scopeForAgent(exec.agent) ?? binding.sessionId, originChannel: binding.originChannel,
+            capabilityId: decision.capability.id, policyVersion: decision.policyVersion,
+            eventType: 'policy_decision', reasonCode: decision.reasonCode, outcome: 'denied', createdAt: Date.now() })
+        }
+      } catch { if (decision.capability.risk === 'sensitive') return 'ELARA access denied (AUDIT_UNAVAILABLE)' }
+    }
+    return allowed ? undefined : denialText(decision)
   })
-  ctx.on('tools/result', exec => {
+  ctx.on('tools/result', (exec, result) => {
+    const entry = executionAudit.get(exec.token)
+    executionAudit.delete(exec.token)
+    correlation.delete(exec.token)
+    trackedExecutions.delete(exec.token)
+    staleExecutions.delete(exec.token)
+    const stopRequestId = stopForExecution.get(exec.token)
+    stopForExecution.delete(exec.token)
+    if (entry) {
+      const remoteUnknown = exec.signal.aborted && capabilityForTool(exec.name, exec.arguments).executionLocation === 'routed_device'
+        && service.deviceKind(targetFor(entry.binding)) === 'companion'
+      try { service.recordAudit({ schemaVersion: 1, operationId: entry.operationId,
+        executionId: entry.executionId, stopRequestId, principalId: entry.binding.principalId,
+        sessionId: scopeForAgent(exec.agent) ?? entry.binding.sessionId, originChannel: entry.binding.originChannel,
+        capabilityId: entry.capabilityId, toolName: entry.toolName,
+        eventType: 'execution_settled', reasonCode: remoteUnknown ? 'REMOTE_EXECUTION_UNCONFIRMED'
+          : exec.signal.aborted ? 'EXECUTION_CANCELLED' : result.isError ? 'EXECUTION_FAILED' : 'EXECUTION_COMPLETED',
+        outcome: remoteUnknown ? 'unknown' : exec.signal.aborted ? 'cancelled' : result.isError ? 'failed' : 'completed',
+        createdAt: Date.now(), durationMs: Date.now() - entry.startedAt }) } catch { /* degraded */ }
+    }
     grants.delete(exec.token)
     liveExecutions.delete(exec.token)
     return undefined
   })
-  ctx.effect(() => () => { inbox.close(); grants.clear(); liveExecutions.clear() })
+  ctx.effect(() => () => { inbox.close(); grants.clear(); liveExecutions.clear(); trackedExecutions.clear(); staleExecutions.clear(); stopForExecution.clear() })
   ctx.effect(() => () => store.close())
 
   if (!state.enabled) console.error(`[ELARA-ACCESS] ${state.diagnostic}`)

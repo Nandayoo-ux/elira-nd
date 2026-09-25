@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
@@ -83,40 +83,112 @@ async function resolveSafePath(targetPath: string): Promise<string> {
   throw new Error(`Path ${targetPath} is outside allowed workspaces or invalid.`);
 }
 
-async function safeExec(cmd: string, args: string[], cwdStr?: string): Promise<{ ok: boolean, exitCode: number | null, stdout: string, stderr: string, durationMs: number }> {
-    const cwd = await resolveSafePath(cwdStr || POLICY.workspaceRoots[0]);
-    
-    return new Promise((resolve) => {
-        let stdout = '';
-        let stderr = '';
-        
-        const child = spawn(cmd, args, {
-            cwd,
-            shell: false,
-            windowsHide: true,
-            timeout: POLICY.processTimeoutMs
-        });
-        
-        const startTime = Date.now();
-        
-        child.stdout.on('data', (data) => {
-            stdout += data.toString();
-            if (stdout.length > POLICY.maxOutputBytes) stdout = stdout.slice(0, POLICY.maxOutputBytes) + '\n[TRUNCATED]';
-        });
-        
-        child.stderr.on('data', (data) => {
-            stderr += data.toString();
-            if (stderr.length > POLICY.maxOutputBytes) stderr = stderr.slice(0, POLICY.maxOutputBytes) + '\n[TRUNCATED]';
-        });
-        
-        child.on('error', (err) => {
-            resolve({ ok: false, exitCode: -1, stdout, stderr: stderr + '\n' + err.message, durationMs: Date.now() - startTime });
-        });
-        
-        child.on('close', (code) => {
-            resolve({ ok: code === 0, exitCode: code, stdout, stderr, durationMs: Date.now() - startTime });
-        });
-    });
+interface ProcessRow { ProcessId: number; ParentProcessId: number; CreationDate: string }
+async function windowsProcessRows(): Promise<ProcessRow[]> {
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress'],
+    { windowsHide: true, timeout: 5000, maxBuffer: 2 * 1024 * 1024 })
+  const rows = JSON.parse(stdout)
+  return Array.isArray(rows) ? rows : rows ? [rows] : []
+}
+function ownedProcessTree(rows: ProcessRow[], rootPid: number): ProcessRow[] {
+  const ids = new Set([rootPid])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const row of rows) if (!ids.has(row.ProcessId) && ids.has(row.ParentProcessId)) {
+      ids.add(row.ProcessId); changed = true
+    }
+  }
+  return rows.filter(row => ids.has(row.ProcessId))
+}
+
+export function createTerminationGate(terminate: () => Promise<void>) {
+  let operation: Promise<void> | undefined
+  return {
+    request: () => (operation ??= Promise.resolve().then(terminate)),
+    wait: () => operation ?? Promise.resolve(),
+    verified: async () => {
+      try { await operation; return true } catch { return false }
+    },
+  }
+}
+
+export function waitForProcessSettlement(child: Pick<ChildProcess, 'on' | 'once' | 'off'>,
+  termination: ReturnType<typeof createTerminationGate>): Promise<{
+    code: number | null; error?: Error; verified: boolean
+  }> {
+  return new Promise(resolve => {
+    let failure: Error | undefined
+    const onError = (error: Error) => { failure = error }
+    child.on('error', onError)
+    child.once('close', (code: number | null) => {
+      child.off('error', onError)
+      void termination.verified().then(verified => resolve({ code, error: failure, verified }))
+    })
+  })
+}
+
+async function safeExec(cmd: string, args: string[], cwdStr?: string, signal?: AbortSignal): Promise<{ ok: boolean, exitCode: number | null, stdout: string, stderr: string, durationMs: number }> {
+  const cwd = await resolveSafePath(cwdStr || POLICY.workspaceRoots[0]);
+  if (signal?.aborted) throw new Error('CANCELLED_BEFORE_SPAWN')
+  return new Promise(resolve => {
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    let closed = false
+    let cancelling = false
+    let unconfirmed = false
+    const started = Date.now()
+    const child = spawn(cmd, args, { cwd, shell: false, windowsHide: true })
+    const terminate = async () => {
+      if (!child.pid) { if (!child.kill()) unconfirmed = true; return }
+      if (process.platform === 'win32') {
+        let owned: ProcessRow[] = []
+        try { owned = ownedProcessTree(await windowsProcessRows(), child.pid) }
+        catch { unconfirmed = true }
+        try {
+          await execFileAsync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'],
+            { windowsHide: true, timeout: 5000, maxBuffer: 8192 })
+        } catch { unconfirmed = true; child.kill() }
+        try {
+          const remaining = await windowsProcessRows()
+          if (owned.some(original => remaining.some(row => row.ProcessId === original.ProcessId
+            && row.CreationDate === original.CreationDate))) unconfirmed = true
+          if (ownedProcessTree(remaining, child.pid).length > 0) unconfirmed = true
+        } catch { unconfirmed = true }
+      } else if (!child.kill()) unconfirmed = true
+    }
+    const termination = createTerminationGate(terminate)
+    const onAbort = () => {
+      if (settled || closed) return
+      cancelling = true
+      void termination.request().catch(() => { unconfirmed = true })
+    }
+    const timer = setTimeout(onAbort, POLICY.processTimeoutMs)
+    timer.unref()
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+    child.stdout.on('data', data => {
+      stdout += data.toString()
+      if (stdout.length > POLICY.maxOutputBytes) stdout = stdout.slice(0, POLICY.maxOutputBytes) + '\n[TRUNCATED]'
+    })
+    child.stderr.on('data', data => {
+      stderr += data.toString()
+      if (stderr.length > POLICY.maxOutputBytes) stderr = stderr.slice(0, POLICY.maxOutputBytes) + '\n[TRUNCATED]'
+    })
+    child.once('close', () => { closed = true })
+    void waitForProcessSettlement(child, termination).then(({ code, error, verified }) => {
+      if (!verified) unconfirmed = true
+      settled = true
+      cleanup()
+      resolve({ ok: !cancelling && !error && code === 0, exitCode: error ? -1 : code, stdout,
+        stderr: unconfirmed ? 'PROCESS_TERMINATION_UNCONFIRMED'
+          : cancelling ? 'PROCESS_CANCELLED' : error ? stderr + '\n' + error.message : stderr,
+        durationMs: Date.now() - started })
+    })
+  })
 }
 
 export async function resolveNpmCliEntry(): Promise<string> {
@@ -134,19 +206,21 @@ export async function resolveNpmCliEntry(): Promise<string> {
   throw new Error(`Configured npm CLI does not point to a readable file.`)
 }
 
-async function runPowerShell(script: string): Promise<string> {
+async function runPowerShell(script: string, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw new Error('CANCELLED_BEFORE_SPAWN')
   const { stdout } = await execFileAsync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024 },
+    { windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024, signal },
   )
   return stdout.trim()
 }
 
-export async function executeLocalTool(name: string, argsObj: any): Promise<any> {
+export async function executeLocalTool(name: string, argsObj: any, signal?: AbortSignal): Promise<any> {
   const start = Date.now();
   console.log(`[ELARA-COMPANION] ${name} request start`);
   try {
+    if (signal?.aborted) throw new Error('CANCELLED_BEFORE_DISPATCH')
     switch (name) {
       case 'elara_windows_status': {
         if (process.platform !== 'win32') {
@@ -170,7 +244,7 @@ $result = [pscustomobject]@{
 }
 $result | ConvertTo-Json -Compress
 `
-        const raw = await runPowerShell(script)
+        const raw = await runPowerShell(script, signal)
         const status = JSON.parse(raw) as any
         
         const hostname = os.hostname();
@@ -225,19 +299,19 @@ $result | ConvertTo-Json -Compress
         if (!rule.validator(payload.args)) {
           throw new Error(`Arguments not allowed for ${payload.executable}.`);
         }
-        return await safeExec(payload.executable, payload.args, payload.cwd);
+        return await safeExec(payload.executable, payload.args, payload.cwd, signal);
       }
 
       case 'elara_project_test': {
-        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'test'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'test'], argsObj.cwd, signal);
       }
 
       case 'elara_project_build': {
-        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'build'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'build'], argsObj.cwd, signal);
       }
 
       case 'elara_project_typecheck': {
-        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'typecheck'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'typecheck'], argsObj.cwd, signal);
       }
 
       default:

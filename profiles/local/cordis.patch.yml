@@ -2,6 +2,10 @@
 # The paths are absolute so the DSH plugin loader does not resolve them
 # relative to its own profile directory.
 - insert:
+    - id: elara-access
+      name: 'D:/Tan/script/elara-ai/plugins/elara-access.ts'
+    - id: elara-control
+      name: 'D:/Tan/script/elara-ai/plugins/elara-control.ts'
     - id: elara-core
       name: 'D:/Tan/script/elara-ai/plugins/elara-core.ts'
     - id: elara-memory
@@ -60,3 +64,9 @@
           - Technical work → prioritize accuracy and practical usefulness.
           - Do not claim a tool was used unless an actual tool call occurred.
           - Do not fabricate facts, experiences, sources, or results.
+- id: agent-presets
+  config:
+    default: elara
+    roots:
+      - path: 'D:/Tan/script/elara-ai/profiles/local/.agent-presets'
+        trust: system

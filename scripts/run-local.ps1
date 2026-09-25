@@ -13,6 +13,7 @@ if (-not (Test-Path $Patch)) {
 
 $RuntimeBin = Join-Path $Root '.runtime\bin'
 $env:PATH = "$RuntimeBin;$env:PATH"
+$env:ELARA_ROOT = $Root
 
 Push-Location $DshDir
 try {

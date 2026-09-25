@@ -2,6 +2,7 @@ import { after, before, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
+import * as crypto from 'node:crypto'
 import * as http from 'node:http'
 import * as net from 'node:net'
 import * as os from 'node:os'
@@ -32,6 +33,8 @@ let ctx
 let dashboardPort
 let dashboardUrl
 let applyWhatsAppPlugin
+let blockFixtureResponse
+let executeReviewedWindowsTool
 let ToolCallId
 let RuntimeSessionId
 const sent = []
@@ -206,6 +209,7 @@ before(async () => {
   const fixtureSource = path.join(fixtureRoot, 'source')
   const copiedSources = [
     'plugins/elara-access.ts',
+    'plugins/elara-control.ts',
     'plugins/elara-core.ts', 'plugins/elara-memory.ts', 'plugins/windows-tools.ts',
     'plugins/windows-tools-local.ts', 'plugins/dashboard-api.ts', 'plugins/companion-api.ts',
     'channels/whatsapp-baileys/plugin.ts', 'channels/whatsapp-baileys/emotion.ts',
@@ -213,7 +217,7 @@ before(async () => {
     'channels/whatsapp-baileys/transcription.ts', 'channels/whatsapp-baileys/typing.ts',
     'tests/fixtures/runtime/fake-provider.ts',
     'packages/policy/contracts.ts', 'packages/policy/config.ts',
-    'packages/policy/store.ts', 'packages/policy/evaluate.ts', 'packages/policy/approvals.ts',
+    'packages/policy/store.ts', 'packages/policy/audit.ts', 'packages/policy/evaluate.ts', 'packages/policy/approvals.ts',
   ]
   for (const relative of copiedSources) {
     const target = path.join(fixtureSource, relative)
@@ -232,6 +236,8 @@ before(async () => {
   )
   const pluginUrl = relative => pathToFileURL(path.join(fixtureSource, relative)).href
   applyWhatsAppPlugin = (await import(pluginUrl('channels/whatsapp-baileys/plugin.ts'))).apply
+  blockFixtureResponse = (await import(pluginUrl('tests/fixtures/runtime/fake-provider.ts'))).blockResponse
+  executeReviewedWindowsTool = (await import(pluginUrl('plugins/windows-tools.ts'))).executeReviewedWindowsTool
   const overrides = [
     { id: 'settings', config: { path: path.join(dshHome, 'settings.yaml'), watch: false } },
     { id: 'storage-json', config: { root: path.join(dshHome, 'storages') } },
@@ -251,6 +257,7 @@ before(async () => {
         includeUserRoot: false,
       } },
       { id: 'elara-access', name: pluginUrl('plugins/elara-access.ts') },
+      { id: 'elara-control', name: pluginUrl('plugins/elara-control.ts') },
       { id: 'elara-memory', name: pluginUrl('plugins/elara-memory.ts') },
       { id: 'elara-core', name: pluginUrl('plugins/elara-core.ts') },
       { id: 'elara-windows-tools', name: pluginUrl('plugins/windows-tools.ts') },
@@ -707,8 +714,43 @@ describe('offline DSH-loader composition', () => {
         principalId: 'fixture-user-a', role: 'operator',
       }),
     })
-    assert.equal(response.status, 403)
-    assert.equal((await response.json()).code, 'SESSION_OWNER_CONFLICT')
+    assert.equal(response.status, 404)
+    assert.equal((await response.json()).error, 'Session not found')
+  })
+
+  test('dashboard stop endpoints authorize every read and expose redacted audit history', async () => {
+    const sessionId = 'fixture-control-dashboard'
+    const handle = await createLocalAgent(sessionId)
+    const headers = { Authorization: `Bearer ${dashboardToken}` }
+    try {
+      const foreign = await fetch(`${dashboardUrl}/api/sessions/${encodeURIComponent('whatsapp:user-a@s.whatsapp.net')}/stop`, {
+        method: 'POST', headers,
+      })
+      assert.equal(foreign.status, 404)
+      const request = await fetch(`${dashboardUrl}/api/sessions/${encodeURIComponent(sessionId)}/stop`, {
+        method: 'POST', headers,
+      })
+      assert.equal(request.status, 202)
+      const { stopRequestId } = await request.json()
+      assert.ok(stopRequestId)
+      const settled = await waitFor(async () => {
+        const response = await fetch(`${dashboardUrl}/api/stops/${stopRequestId}`, { headers })
+        const body = await response.json()
+        return body.outcome !== 'stopping' ? body : undefined
+      }, 'stop settlement')
+      assert.equal(settled.outcome, 'stopped')
+      const audit = await fetch(`${dashboardUrl}/api/sessions/${encodeURIComponent(sessionId)}/audit?limit=1`, { headers })
+      assert.equal(audit.status, 200)
+      const page = await audit.json()
+      assert.equal(page.events.length, 1)
+      assert.equal(page.events[0].stopRequestId, stopRequestId)
+      assert.doesNotMatch(JSON.stringify(page), /synthetic-secret|stdout|arguments|rawPath/)
+      const unknown = await fetch(`${dashboardUrl}/api/stops/${crypto.randomUUID()}`, { headers })
+      assert.equal(unknown.status, 404)
+      assert.throws(() => ctx.control.getStopStatus({ principalId: 'fixture-user-a', originChannel: 'dashboard' }, stopRequestId), /SESSION_NOT_FOUND/)
+      assert.throws(() => ctx.control.listAudit({ principalId: 'fixture-operator', originChannel: 'whatsapp' }, sessionId), /SESSION_NOT_FOUND/)
+      assert.doesNotThrow(() => ctx.control.admit({ principalId: 'fixture-operator', originChannel: 'dashboard' }, sessionId))
+    } finally { await handle.dispose() }
   })
 
   test('dashboard project execution stops at approval-required before dispatch', async () => {
@@ -799,6 +841,81 @@ describe('offline DSH-loader composition', () => {
       } finally {
         defaults.dashboard = originalTarget
       }
+    } finally {
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('stop cancels a pending one-time approval and fences its old tool call', async () => {
+    const handle = await createLocalAgent('fixture-control-approval')
+    const agent = handle.agent
+    const file = path.join(fixtureRoot, 'stop-must-not-write.txt')
+    const controller = new AbortController()
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pending = ctx.tools.execute({ callId: ToolCallId('fixture-stop-write'), name: 'write',
+        arguments: { file_path: file, content: 'synthetic-secret-must-not-persist' },
+        agent, signal: controller.signal })
+      const approval = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0], 'stop approval')
+      const stop = ctx.control.requestStop({ principalId: 'fixture-operator', originChannel: 'dashboard' }, String(agent.id))
+      assert.equal(ctx.access.answerApproval(approval.id, 'fixture-operator', 'dashboard', true), false)
+      assert.equal((await pending).isError, true)
+      assert.equal(fs.existsSync(file), false)
+      await waitFor(() => ctx.control.getStopStatus({ principalId: 'fixture-operator', originChannel: 'dashboard' }, stop.id).outcome !== 'stopping', 'approval stop settlement')
+      const audit = ctx.control.listAudit({ principalId: 'fixture-operator', originChannel: 'dashboard' }, String(agent.id))
+      assert.ok(audit.some(row => row.eventType === 'approval_resolved' && row.outcome === 'cancelled'))
+      assert.doesNotMatch(JSON.stringify(audit), /synthetic-secret-must-not-persist/)
+    } finally {
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('synthetic audit append failure denies sensitive dispatch', async () => {
+    const handle = await createLocalAgent('fixture-audit-failure')
+    const agent = handle.agent
+    const file = path.join(fixtureRoot, 'audit-failure-must-not-write.txt')
+    const controller = new AbortController()
+    const original = ctx.access.recordAudit
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pending = ctx.tools.execute({ callId: ToolCallId('fixture-audit-failure-write'), name: 'write',
+        arguments: { file_path: file, content: 'synthetic audit failure marker' },
+        agent, signal: controller.signal })
+      const approval = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0], 'audit failure approval')
+      ctx.access.recordAudit = () => { throw new Error('SYNTHETIC_AUDIT_WRITE_FAILURE') }
+      assert.equal(ctx.access.answerApproval(approval.id, 'fixture-operator', 'dashboard', true), true)
+      const result = await pending
+      assert.equal(result.isError, true)
+      assert.match(result.error.message, /AUDIT_UNAVAILABLE/)
+      assert.equal(fs.existsSync(file), false)
+    } finally {
+      ctx.access.recordAudit = original
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('approval answer racing with stop cannot dispatch a stale write', async () => {
+    const handle = await createLocalAgent('fixture-approval-stop-race')
+    const agent = handle.agent
+    const file = path.join(fixtureRoot, 'approval-stop-race.txt')
+    const controller = new AbortController()
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pending = ctx.tools.execute({ callId: ToolCallId('fixture-approval-stop-race-write'), name: 'write',
+        arguments: { file_path: file, content: 'race marker' }, agent, signal: controller.signal })
+      const approval = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0], 'racing approval')
+      assert.equal(ctx.access.answerApproval(approval.id, 'fixture-operator', 'dashboard', true), true)
+      const stop = ctx.control.requestStop({ principalId: 'fixture-operator', originChannel: 'dashboard' }, String(agent.id))
+      assert.equal((await pending).isError, true)
+      assert.equal(fs.existsSync(file), false)
+      const rows = ctx.control.listAudit({ principalId: 'fixture-operator', originChannel: 'dashboard' }, String(agent.id))
+      assert.ok(rows.some(row => row.stopRequestId === stop.id))
     } finally {
       controller.abort()
       agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
@@ -939,5 +1056,230 @@ describe('offline DSH-loader composition', () => {
     await waitFor(() => sent.find(item => item.remoteJid === b && item.text?.includes('fixture:pesan setelah reset')),
       'reply from fresh session')
     assert.equal(ctx.access.bindingForSession(oldSession)?.principalId, 'fixture-user-b')
+  })
+
+  test('WhatsApp .stop bypasses the conversation queue and acknowledges only its sender scope', async () => {
+    const jid = 'user-a@s.whatsapp.net'
+    const beforeRequests = requestRows().length
+    const beforeSent = sent.length
+    emitMessage(jid, 'fixture-stop-command', '.stop')
+    const ack = await waitFor(() => sent.slice(beforeSent).find(item => item.remoteJid === jid
+      && item.text?.includes('ID')), 'stop acknowledgment')
+    assert.match(ack.text, /Stop diminta|Tidak ada pekerjaan aktif/)
+    assert.equal(requestRows().length, beforeRequests)
+    emitMessage('user-b@s.whatsapp.net', 'fixture-other-after-stop', 'tetap jalan')
+    await waitFor(() => sent.find(item => item.remoteJid === 'user-b@s.whatsapp.net'
+      && item.text?.includes('fixture:tetap jalan')), 'other session reply after stop')
+    emitMessage(jid, 'fixture-new-after-stop', 'mulai lagi')
+    await waitFor(() => sent.find(item => item.remoteJid === jid && item.text?.includes('fixture:mulai lagi')),
+      'fresh work after confirmed stop')
+  })
+
+  test('a delayed .pc result cannot reply or finish stop before its direct operation settles', async () => {
+    const jid = 'user-a@s.whatsapp.net'
+    const original = ctx.access.executeDirect
+    const entered = deferred()
+    const release = deferred()
+    const before = sent.length
+    ctx.access.executeDirect = async request => {
+      entered.resolve(request.signal)
+      await release.promise // Synthetic adapter ignores abort so settlement remains observable.
+      return 'fixture stale pc result'
+    }
+    try {
+      emitMessage(jid, 'fixture-delayed-pc', '.pc')
+      const signal = await entered.promise
+      emitMessage(jid, 'fixture-stop-delayed-pc', '.stop')
+      const ack = await waitFor(() => sent.slice(before).find(item => item.remoteJid === jid
+        && item.text?.includes('Stop diminta')), 'direct stop acknowledgment')
+      const id = ack.text.match(/ID: ([a-f0-9-]+)/)?.[1]
+      assert.ok(id)
+      assert.equal(signal.aborted, true)
+      assert.equal(ctx.control.getStopStatus({ principalId: 'fixture-user-a', originChannel: 'whatsapp' }, id).outcome,
+        'stopping')
+      release.resolve()
+      await waitFor(() => ctx.control.getStopStatus({ principalId: 'fixture-user-a', originChannel: 'whatsapp' }, id).outcome
+        === 'stopped', 'direct stop settlement')
+      assert.equal(sent.slice(before).some(item => item.text?.includes('fixture stale pc result')), false)
+      ctx.access.executeDirect = async () => 'fixture fresh pc result'
+      emitMessage(jid, 'fixture-fresh-pc', '.pc')
+      await waitFor(() => sent.slice(before).find(item => item.remoteJid === jid
+        && item.text?.includes('fixture fresh pc result')), 'fresh direct status reply')
+    } finally {
+      release.resolve()
+      ctx.access.executeDirect = original
+    }
+  })
+
+  test('dashboard status returns a stop response after its direct operation is cancelled', async () => {
+    const original = ctx.access.executeDirect
+    const entered = deferred()
+    const release = deferred()
+    const headers = { Authorization: `Bearer ${dashboardToken}` }
+    ctx.access.executeDirect = async request => {
+      entered.resolve(request.signal)
+      await release.promise
+      return 'fixture stale dashboard status'
+    }
+    try {
+      const statusRequest = fetch(`${dashboardUrl}/api/status`, { headers })
+      const signal = await entered.promise
+      const stopResponse = await fetch(`${dashboardUrl}/api/sessions/${encodeURIComponent('dashboard:control')}/stop`,
+        { method: 'POST', headers })
+      assert.equal(stopResponse.status, 202)
+      const { stopRequestId } = await stopResponse.json()
+      assert.equal(signal.aborted, true)
+      assert.equal(ctx.control.getStopStatus({ principalId: 'fixture-operator', originChannel: 'dashboard' },
+        stopRequestId).outcome, 'stopping')
+      release.resolve()
+      const response = await statusRequest
+      assert.equal(response.status, 409)
+      assert.doesNotMatch(JSON.stringify(await response.json()), /fixture stale dashboard status/)
+      await waitFor(() => ctx.control.getStopStatus({ principalId: 'fixture-operator', originChannel: 'dashboard' },
+        stopRequestId).outcome === 'stopped', 'dashboard direct stop settlement')
+    } finally {
+      release.resolve()
+      ctx.access.executeDirect = original
+    }
+  })
+
+  test('a cancelled companion status wait cannot confirm remote termination', async () => {
+    const sessionId = 'dashboard:remote-status-fixture'
+    const owner = { principalId: 'fixture-operator', originChannel: 'dashboard' }
+    ctx.access.bindRootSession(sessionId, owner.principalId, owner.originChannel)
+    const admission = ctx.control.admit(owner, sessionId)
+    const entered = deferred()
+    const release = deferred()
+    const adapter = {
+      control: ctx.control,
+      access: { executeDirect: async (_request, operation) => operation(), deviceKind: () => 'companion' },
+      companion: { executeTool: async () => { entered.resolve(); await release.promise; return 'remote finished' } },
+    }
+    const operation = executeReviewedWindowsTool(adapter,
+      { ...owner, sessionId, targetDeviceId: 'synthetic-companion', source: 'dashboard:status',
+        capabilityId: 'system.status' }, 'elara_windows_status', {}, admission)
+    try {
+      await entered.promise
+      const stop = ctx.control.requestStop(owner, sessionId)
+      assert.equal(stop.outcome, 'stopping')
+      release.resolve()
+      await operation
+      await waitFor(() => ctx.control.getStopStatus(owner, stop.id).outcome === 'unconfirmed',
+        'remote wait unconfirmed settlement')
+    } finally { release.resolve() }
+  })
+
+  test('stop during model work invalidates an older queued WhatsApp message', async () => {
+    const jid = 'user-a@s.whatsapp.net'
+    const firstText = 'fixture blocked model work'
+    const queuedText = 'fixture queued before stop'
+    const block = blockFixtureResponse(firstText)
+    let started = false
+    void block.started.then(() => { started = true })
+    const beforeSent = sent.length
+    try {
+      emitMessage(jid, 'fixture-blocked-model', firstText)
+      await waitFor(() => started, 'blocked model request')
+      emitMessage(jid, 'fixture-queued-before-stop', queuedText)
+      emitMessage(jid, 'fixture-stop-model-queue', '.stop')
+      const ack = await waitFor(() => sent.slice(beforeSent).find(item => item.remoteJid === jid
+        && item.text?.includes('Stop diminta')), 'model stop acknowledgment')
+      const id = ack.text.match(/ID: ([a-f0-9-]+)/)?.[1]
+      assert.ok(id)
+      await waitFor(() => ctx.control.getStopStatus({ principalId: 'fixture-user-a', originChannel: 'whatsapp' }, id).outcome !== 'stopping',
+        'model stop settlement')
+      block.release()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(requestRows().some(row => row.text === queuedText), false)
+      assert.equal(sent.slice(beforeSent).some(item => item.text?.includes(`fixture:${queuedText}`)), false)
+      assert.equal(sent.slice(beforeSent).some(item => item.text?.includes(`fixture:${firstText}`)), false)
+      emitMessage(jid, 'fixture-fresh-after-model-stop', 'fresh after model stop')
+      await waitFor(() => sent.find(item => item.remoteJid === jid
+        && item.text?.includes('fixture:fresh after model stop')), 'fresh model work after stop')
+    } finally { block.release() }
+  })
+
+  test('stop during voice transcription suppresses the stale model submission', async () => {
+    let releaseResponse
+    let entered
+    const enteredPromise = new Promise(resolve => { entered = resolve })
+    const responseGate = new Promise(resolve => { releaseResponse = resolve })
+    const server = http.createServer(async (request, response) => {
+      request.resume()
+      entered()
+      await responseGate
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ text: 'fixture stopped transcription' }))
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const previous = process.env.ELARA_TRANSCRIPTION_BASE_URL
+    process.env.ELARA_TRANSCRIPTION_BASE_URL = `http://127.0.0.1:${server.address().port}/v1`
+    const jid = 'user-a@s.whatsapp.net'
+    const before = requestRows().length
+    try {
+      emitStructuredMessage(jid, 'fixture-voice-stop', {
+        audioMessage: { ptt: true, mimetype: 'audio/ogg', __fixtureBytes: [79, 103, 103, 83, 4, 5, 6] },
+      })
+      await enteredPromise
+      ctx.control.requestStop({ principalId: 'fixture-user-a', originChannel: 'whatsapp' }, `whatsapp:${jid}`)
+      releaseResponse()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(requestRows().slice(before).some(row => row.text.includes('fixture stopped transcription')), false)
+    } finally {
+      releaseResponse()
+      if (previous === undefined) delete process.env.ELARA_TRANSCRIPTION_BASE_URL
+      else process.env.ELARA_TRANSCRIPTION_BASE_URL = previous
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  test('stop at typing boundary suppresses a stale reply bubble', async () => {
+    const jid = 'user-a@s.whatsapp.net'
+    const text = 'fixture typing stop boundary'
+    const before = sent.length
+    let stopped = false
+    const off = ctx.on('elara/test-whatsapp-typing-delay', payload => {
+      if (payload.jid !== jid || !payload.bubble?.includes(text) || stopped) return
+      stopped = true
+      ctx.control.requestStop({ principalId: 'fixture-user-a', originChannel: 'whatsapp' }, `whatsapp:${jid}`)
+    })
+    try {
+      emitMessage(jid, 'fixture-stop-typing', text)
+      await waitFor(() => stopped, 'typing boundary stop')
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(sent.slice(before).some(item => item.remoteJid === jid && item.text?.includes(`fixture:${text}`)), false)
+    } finally { off() }
+  })
+
+  test('stop during agent setup prevents the admitted message from reaching the model', async () => {
+    const jid = 'user-b@s.whatsapp.net'
+    const statePath = path.join(fixtureRoot, '.runtime', 'whatsapp-sessions.json')
+    const previousSessions = new Set(Object.values(JSON.parse(fs.readFileSync(statePath, 'utf8'))))
+    const beforeSent = sent.length
+    emitMessage(jid, 'fixture-setup-reset', '.new')
+    await waitFor(() => sent.slice(beforeSent).some(item => item.remoteJid === jid
+      && item.text?.includes('konteks baru')), 'setup reset')
+    const currentSessions = Object.values(JSON.parse(fs.readFileSync(statePath, 'utf8')))
+    const sessionId = currentSessions.find(id => !previousSessions.has(id))
+    assert.ok(sessionId)
+    let entered
+    let release
+    const enteredPromise = new Promise(resolve => { entered = resolve })
+    const gate = new Promise(resolve => { release = resolve })
+    const off = ctx.on('agent/created', async ({ agent }) => {
+      if (String(agent.id) !== sessionId) return undefined
+      entered()
+      await gate
+      return undefined
+    })
+    const text = 'fixture stopped during setup'
+    try {
+      emitMessage(jid, 'fixture-setup-blocked', text)
+      await enteredPromise
+      ctx.control.requestStop({ principalId: 'fixture-user-b', originChannel: 'whatsapp' }, sessionId)
+      release()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(requestRows().some(row => row.text === text), false)
+    } finally { release(); off() }
   })
 })

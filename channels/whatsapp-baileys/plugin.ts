@@ -13,6 +13,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { executeReviewedWindowsTool } from '../../plugins/windows-tools.ts'
 import type { Principal } from '../../packages/policy/contracts.ts'
+import type { SessionAdmission } from '../../packages/policy/contracts.ts'
 import {
   assessEmotion,
   emotionStyleContext,
@@ -29,7 +30,7 @@ export { splitIntoBubbles } from './format.ts'
 
 export const name = 'whatsapp-baileys'
 export const inject = [
-  'agents', 'sessions', 'memory', 'agentPresets', 'agentDefaultModel', 'attachments', 'access',
+  'agents', 'sessions', 'memory', 'agentPresets', 'agentDefaultModel', 'attachments', 'access', 'control',
 ]
 
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
@@ -294,13 +295,17 @@ export function apply(ctx: Context) {
     return content
   }
 
-  async function handleCommand(jid: string, principal: Principal, msg: any, text: string): Promise<boolean> {
+  async function handleCommand(jid: string, principal: Principal, msg: any, text: string,
+    admission: SessionAdmission): Promise<boolean> {
     if (!text.startsWith('.')) return false
     const [rawCommand, ...rest] = text.split(/\s+/)
     const command = rawCommand!.toLowerCase()
     const argument = rest.join(' ').trim()
     const owner = memoryOwnerFor(principal)
-    const reply = (value: string) => sendWA(jid, { text: value }, { quoted: msg })
+    const reply = (value: string) => {
+      ctx.control.assertCurrent(admission)
+      return sendWA(jid, { text: value }, { quoted: msg })
+    }
 
     if (command === '.help') {
       await reply([
@@ -346,7 +351,7 @@ export function apply(ctx: Context) {
         targetDeviceId: ctx.access.defaultTarget('whatsapp'),
         source: 'whatsapp:pc',
         capabilityId: 'system.status',
-      }, 'elara_windows_status', {})))
+      }, 'elara_windows_status', {}, admission)))
       return true
     }
     if (command === '.dashboard') {
@@ -401,7 +406,7 @@ export function apply(ctx: Context) {
     return false
   }
 
-  async function processMessage(msg: any, jid: string, expectedPrincipalId: string): Promise<void> {
+  async function processMessage(msg: any, jid: string, expectedPrincipalId: string, admission: SessionAdmission): Promise<void> {
     const principal = ctx.access.principalForAlias('whatsapp', jid)
     if (!principal || principal.id !== expectedPrincipalId) return
     const sessionId = sessionFor(jid)
@@ -411,10 +416,13 @@ export function apply(ctx: Context) {
     if (!text && !hasMedia) return
 
     try {
-      if (await handleCommand(jid, principal, msg, text)) return
+      ctx.control.assertCurrent(admission)
+      if (await handleCommand(jid, principal, msg, text, admission)) return
+      ctx.control.assertCurrent(admission)
       await socket?.sendPresenceUpdate('composing', jid).catch(() => undefined)
       const owner = memoryOwnerFor(principal)
       const agent = await acquireAgent(sessionId)
+      ctx.control.assertCurrent(admission)
       const before = agent.session.deriveMessages()
       const emotion = assessEmotion(text, emotionModeFor(jid))
       agent.inject(createUserMessage({
@@ -433,12 +441,15 @@ export function apply(ctx: Context) {
         for (const memory of memories) ctx.memory.updateLastUsed(owner, memory.id)
       }
       const content = await buildContent(msg, text)
+      ctx.control.assertCurrent(admission)
       await ctx.agents.withInitiator(agent, async () => {
+        ctx.control.assertCurrent(admission)
         agent.followup(createUserMessage({ source: { kind: 'user' }, content }))
         await Promise.resolve()
         await agent.whenIdle()
       })
       await ctx.sessions.flush(agent.session)
+      ctx.control.assertCurrent(admission)
 
       const beforeIds = new Set(before.map((item: any) => item.id))
       const fresh = agent.session.deriveMessages().filter((item: any) => !beforeIds.has(item.id))
@@ -452,6 +463,7 @@ export function apply(ctx: Context) {
 
       const bubbles = splitIntoBubbles(response)
       for (let index = 0; index < bubbles.length; index++) {
+        ctx.control.assertCurrent(admission)
         const plannedDelay = typingDelayMs(bubbles[index], {
           firstBubble: index === 0,
           emotionLevel: emotion.effectiveLevel,
@@ -468,16 +480,21 @@ export function apply(ctx: Context) {
           await socket?.sendPresenceUpdate('composing', jid).catch(() => undefined)
           await new Promise(resolve => setTimeout(resolve, delay))
         }
+        ctx.control.assertCurrent(admission)
         await sendWA(jid, { text: bubbles[index] }, index === 0 ? { quoted: msg } : undefined)
       }
     } catch (error) {
+      if (error instanceof Error && ['SESSION_STOPPED', 'SESSION_STOPPING', 'SESSION_UNCONFIRMED'].includes(error.message)) return
       const code = typeof error === 'object' && error !== null && 'code' in error
         ? String(error.code) : error instanceof Error ? error.name : 'unknown'
       console.error(`[ELARA] WhatsApp request failed for ${userKey(jid)} (${code})`)
+      try { ctx.control.assertCurrent(admission) } catch { return }
       await sendWA(jid, { text: userSafeError(error) }, { quoted: msg })
         .catch(() => undefined)
     } finally {
-      await socket?.sendPresenceUpdate('paused', jid).catch(() => undefined)
+      if ((() => { try { ctx.control.assertCurrent(admission); return true } catch { return false } })()) {
+        await socket?.sendPresenceUpdate('paused', jid).catch(() => undefined)
+      }
     }
   }
 
@@ -552,7 +569,27 @@ export function apply(ctx: Context) {
           void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
           continue
         }
-        enqueue(principal.id, () => processMessage(msg, jid, principal.id))
+        const message = messageText(msg.message, extractMessageContent).trim()
+        if (message.toLowerCase() === '.stop') {
+          try {
+            const sessionId = sessionFor(jid)
+            ctx.access.bindRootSession(sessionId, principal.id, 'whatsapp')
+            const stop = ctx.control.requestStop({ principalId: principal.id, originChannel: 'whatsapp' }, sessionId)
+            void socket?.sendPresenceUpdate('paused', jid).catch(() => undefined)
+            void sendWA(jid, { text: stop.outcome === 'idle'
+              ? `Tidak ada pekerjaan aktif. ID stop: ${stop.id}`
+              : `Stop diminta. ID: ${stop.id}. Status: ${stop.outcome}.` }).catch(() => undefined)
+          } catch { void sendWA(jid, { text: 'Stop tidak tersedia untuk sesi ini.' }).catch(() => undefined) }
+          continue
+        }
+        try {
+          const sessionId = sessionFor(jid)
+          ctx.access.bindRootSession(sessionId, principal.id, 'whatsapp')
+          const admission = ctx.control.admit({ principalId: principal.id, originChannel: 'whatsapp' }, sessionId)
+          enqueue(principal.id, () => processMessage(msg, jid, principal.id, admission))
+        } catch {
+          void sendWA(jid, { text: 'Sesi sedang dihentikan. Coba lagi setelah selesai.' }).catch(() => undefined)
+        }
       }
     })
     if (process.env.ELARA_MOCK_WA === '1') {

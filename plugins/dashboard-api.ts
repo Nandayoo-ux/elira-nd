@@ -8,9 +8,10 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { executeReviewedWindowsTool } from './windows-tools.ts'
+import type {} from './elara-control.ts'
 
 export const name = 'dashboard-api'
-export const inject = ['agents', 'sessions', 'access', 'agentDefaultModel', 'agentPresets']
+export const inject = ['agents', 'sessions', 'access', 'control', 'agentDefaultModel', 'agentPresets']
 
 function json(res: http.ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -53,7 +54,7 @@ export function apply(ctx: Context) {
     if (binding?.originChannel !== 'dashboard'
       || binding.principalId !== ctx.access.dashboardPrincipal()?.id) return undefined
     event('tool.completed', { sessionId: String(exec.agent?.id || ''), tool: exec.name,
-      isError: result.isError, error: result.error?.message })
+      isError: result.isError })
     return undefined
   })
 
@@ -62,8 +63,9 @@ export function apply(ctx: Context) {
     if (!agent) throw new Error('SESSION_NOT_FOUND')
     const binding = ctx.access.bindingForSession(sessionId)
     if (binding?.principalId !== principalId || binding.originChannel !== 'dashboard') {
-      throw new Error('SESSION_OWNER_CONFLICT')
+      throw new Error('SESSION_NOT_FOUND')
     }
+    const admission = ctx.control.admit({ principalId, originChannel: 'dashboard' }, sessionId)
     const previous = queues.get(sessionId) || Promise.resolve()
     let release!: () => void
     const current = new Promise<void>(resolve => { release = resolve })
@@ -78,13 +80,16 @@ export function apply(ctx: Context) {
       return undefined
     })
     try {
+      ctx.control.assertCurrent(admission)
       const before = new Set(agent.session.deriveMessages().map((item: any) => item.id))
       await ctx.agents.withInitiator(agent, async () => {
+        ctx.control.assertCurrent(admission)
         agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: message }] }))
         await Promise.resolve()
         await agent.whenIdle()
       })
       await ctx.sessions.flush(agent.session)
+      ctx.control.assertCurrent(admission)
       const response = agent.session.deriveMessages()
         .filter((item: any) => !before.has(item.id) && item.role === 'assistant').at(-1)
         ?.content.filter((part: any) => part.type === 'text').map((part: any) => part.text).join('').trim() || ''
@@ -118,11 +123,36 @@ export function apply(ctx: Context) {
         if (req.method === 'GET' && url.pathname === '/api/status') {
           const sessionId = 'dashboard:control'
           ctx.access.bindRootSession(sessionId, principal.id, 'dashboard')
+          const admission = ctx.control.admit({ principalId: principal.id, originChannel: 'dashboard' }, sessionId)
           const request = { principalId: principal.id, sessionId,
             originChannel: 'dashboard', targetDeviceId: ctx.access.defaultTarget('dashboard'),
             source: 'dashboard:status', capabilityId: 'system.status' } as const
-          const summary = await executeReviewedWindowsTool(ctx, request, 'elara_windows_status', {})
-          return json(res, 200, { status: 'running', uptime: process.uptime(), pc: { summary } })
+          try {
+            const summary = await executeReviewedWindowsTool(ctx, request, 'elara_windows_status', {}, admission)
+            ctx.control.assertCurrent(admission)
+            return json(res, 200, { status: 'running', uptime: process.uptime(), pc: { summary }, control: ctx.control.health() })
+          } catch {
+            try { ctx.control.assertCurrent(admission) }
+            catch (error) { return json(res, 409, { error: error instanceof Error ? error.message : 'SESSION_STOPPED' }) }
+            return json(res, 200, { status: 'degraded', uptime: process.uptime(), pc: { summary: 'Unavailable' }, control: ctx.control.health() })
+          }
+        }
+        const sessionStop = url.pathname.match(/^\/api\/sessions\/([^/]+)\/stop$/)
+        if (req.method === 'POST' && sessionStop) {
+          const status = ctx.control.requestStop({ principalId: principal.id, originChannel: 'dashboard' }, decodeURIComponent(sessionStop[1]))
+          return json(res, 202, { stopRequestId: status.id, ...status })
+        }
+        const stopRead = url.pathname.match(/^\/api\/stops\/([^/]+)$/)
+        if (req.method === 'GET' && stopRead) {
+          return json(res, 200, ctx.control.getStopStatus({ principalId: principal.id, originChannel: 'dashboard' }, decodeURIComponent(stopRead[1])))
+        }
+        const auditRead = url.pathname.match(/^\/api\/sessions\/([^/]+)\/audit$/)
+        if (req.method === 'GET' && auditRead) {
+          const cursor = url.searchParams.has('cursor') ? Number(url.searchParams.get('cursor')) : undefined
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined
+          const events = ctx.control.listAudit({ principalId: principal.id, originChannel: 'dashboard' },
+            decodeURIComponent(auditRead[1]), cursor, limit)
+          return json(res, 200, { events, nextCursor: events.at(-1)?.id })
         }
         if (req.method === 'GET' && url.pathname === '/api/sessions') {
           const sessions = ctx.agents.list().filter(agent => {
@@ -183,15 +213,22 @@ export function apply(ctx: Context) {
             }
             return json(res, 200, action ? { result: outcome.response } : { response: outcome.response })
           } catch (error) {
-            if (error instanceof Error && ['SESSION_OWNER_CONFLICT', 'SESSION_OWNER_UNTRUSTED'].includes(error.message)) {
-              return json(res, 403, { error: 'Session belongs to another principal', code: error.message })
+            if (error instanceof Error && ['SESSION_NOT_FOUND', 'SESSION_OWNER_UNTRUSTED'].includes(error.message)) {
+              return json(res, 404, { error: 'Session not found' })
+            }
+            if (error instanceof Error && ['SESSION_STOPPED', 'SESSION_STOPPING', 'SESSION_UNCONFIRMED'].includes(error.message)) {
+              return json(res, 409, { error: error.message, code: error.message })
             }
             throw error
           }
         }
         return json(res, 404, { error: 'Not found' })
       } catch (error) {
-        return json(res, 500, { error: error instanceof Error ? error.message : 'Internal error' })
+        if (error instanceof Error && ['SESSION_NOT_FOUND', 'STOP_NOT_FOUND'].includes(error.message)) return json(res, 404, { error: 'Not found' })
+        if (error instanceof Error && ['SESSION_STOPPED', 'SESSION_STOPPING', 'SESSION_UNCONFIRMED'].includes(error.message)) {
+          return json(res, 409, { error: error.message, code: error.message })
+        }
+        return json(res, 500, { error: 'Internal error' })
       }
     }
     const requestPath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)

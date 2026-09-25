@@ -1,6 +1,7 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -11,7 +12,8 @@ const previousRoot = process.env.ELARA_ROOT
 const previousNpmCli = process.env.ELARA_NPM_CLI
 process.env.ELARA_ROOT = fixtureRoot
 delete process.env.ELARA_NPM_CLI
-const { executeLocalTool, resolveNpmCliEntry } = await import('../plugins/windows-tools-local.ts')
+const { executeLocalTool, resolveNpmCliEntry, createTerminationGate, waitForProcessSettlement } =
+  await import('../plugins/windows-tools-local.ts')
 
 after(() => {
   if (previousRoot === undefined) delete process.env.ELARA_ROOT
@@ -41,6 +43,25 @@ const successProject = project('project with spaces', {
 const failureProject = project('nonzero project', {
   test: 'node ./fixture.mjs',
 }, "console.error('controlled failure')\nprocess.exit(7)\n")
+
+const cancellableProject = project('cancellable project', {
+  test: 'node ./fixture.mjs',
+}, `import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const child = spawn(process.execPath, ['./descendant.mjs'], { stdio: 'ignore', windowsHide: true });
+writeFileSync('parent.pid', String(process.pid));
+writeFileSync('child.pid', String(child.pid));
+setInterval(() => {}, 1000);
+`)
+fs.writeFileSync(path.join(cancellableProject, 'descendant.mjs'), "setInterval(() => {}, 1000)\n")
+
+async function waitForFile(file) {
+  const started = Date.now()
+  while (!fs.existsSync(file)) {
+    if (Date.now() - started > 10_000) throw new Error('Synthetic process did not start')
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
 
 test('resolves npm to a JavaScript CLI entry point', async () => {
   const npmCli = await resolveNpmCliEntry()
@@ -92,6 +113,67 @@ test('a cwd outside the configured workspace is rejected', async () => {
   }
 })
 
+test('cancellation before spawn creates no project process', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(executeLocalTool('elara_project_test', { cwd: cancellableProject }, controller.signal),
+    /CANCELLED_BEFORE/)
+  assert.equal(fs.existsSync(path.join(cancellableProject, 'parent.pid')), false)
+})
+
+test('cancellation terminates the owned project process tree', async () => {
+  const controller = new AbortController()
+  const operation = executeLocalTool('elara_project_test', { cwd: cancellableProject }, controller.signal)
+  await waitForFile(path.join(cancellableProject, 'child.pid'))
+  const parentPid = Number(fs.readFileSync(path.join(cancellableProject, 'parent.pid'), 'utf8'))
+  const childPid = Number(fs.readFileSync(path.join(cancellableProject, 'child.pid'), 'utf8'))
+  controller.abort()
+  const result = await operation
+  assert.equal(result.ok, false)
+  assert.match(result.stderr, /PROCESS_CANCELLED|PROCESS_TERMINATION_UNCONFIRMED/)
+  const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+  assert.equal(alive(parentPid), false)
+  assert.equal(alive(childPid), false)
+})
+
+test('timeout and abort share one termination verification in either order', async () => {
+  for (const triggers of [['timeout', 'abort'], ['abort', 'timeout']]) {
+    let release
+    const verifying = new Promise(resolve => { release = resolve })
+    let calls = 0
+    const gate = createTerminationGate(async () => { calls++; await verifying })
+    const child = new EventEmitter()
+    const settlement = waitForProcessSettlement(child, gate)
+    const trigger = { timeout: () => gate.request(), abort: () => gate.request() }
+    const first = trigger[triggers[0]]()
+    const second = trigger[triggers[1]]()
+    assert.strictEqual(first, second, triggers.join(' then '))
+    assert.strictEqual(gate.wait(), first)
+    let settled = false
+    void settlement.then(() => { settled = true })
+    child.emit('error', new Error('synthetic process error'))
+    child.emit('close', null)
+    await Promise.resolve()
+    assert.equal(calls, 1)
+    assert.equal(settled, false)
+    release()
+    const result = await settlement
+    assert.equal(settled, true)
+    assert.equal(result.verified, true)
+    assert.match(result.error.message, /synthetic process error/)
+  }
+})
+
+test('uncertain termination verification cannot resolve as confirmed', async () => {
+  const gate = createTerminationGate(async () => { throw new Error('synthetic verification failure') })
+  const child = new EventEmitter()
+  const settlement = waitForProcessSettlement(child, gate)
+  const operation = gate.request()
+  assert.strictEqual(gate.request(), operation)
+  child.emit('close', null)
+  assert.equal((await settlement).verified, false)
+})
+
 test('environment diagnostics report presence without credential values', () => {
   const secretValue = 'fixture-secret-must-not-appear'
   const result = spawnSync(process.execPath, [path.join(repositoryRoot, 'scripts', 'test-env.mjs')], {
@@ -107,6 +189,25 @@ test('environment diagnostics report presence without credential values', () => 
 function writeCommand(pathname, body) {
   fs.writeFileSync(pathname, `@echo off\r\n${body}\r\n`)
 }
+
+test('local launcher supplies the repository root to access and WhatsApp plugins', () => {
+  const root = path.join(fixtureRoot, 'launcher root with spaces')
+  const scripts = path.join(root, 'scripts')
+  const runtimeBin = path.join(root, '.runtime', 'bin')
+  fs.mkdirSync(scripts, { recursive: true })
+  fs.mkdirSync(runtimeBin, { recursive: true })
+  fs.mkdirSync(path.join(root, '.runtime', 'deepseek-harness'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'profiles', 'local'), { recursive: true })
+  fs.copyFileSync(path.join(repositoryRoot, 'scripts', 'run-local.ps1'), path.join(scripts, 'run-local.ps1'))
+  fs.writeFileSync(path.join(root, 'profiles', 'local', 'cordis.patch.yml'), '- insert: []\n')
+  writeCommand(path.join(runtimeBin, 'pnpm.cmd'), 'echo ELARA_ROOT=%ELARA_ROOT%')
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(scripts, 'run-local.ps1'),
+  ], { cwd: root, encoding: 'utf8', windowsHide: true,
+    env: { ...process.env, ELARA_ROOT: path.join(root, 'wrong-root') } })
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(result.stdout.includes(`ELARA_ROOT=${root}`), result.stdout)
+})
 
 function bootstrapCase(mode) {
   const root = path.join(fixtureRoot, `bootstrap-${mode}`)

@@ -104,25 +104,56 @@ function To-AbsoluteYamlPath([string]$Path) {
 
 $corePath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-core.ts')
 $accessPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-access.ts')
+$controlPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-control.ts')
 $memoryPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-memory.ts')
 $windowsPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\windows-tools.ts')
 $whatsappPath = To-AbsoluteYamlPath (Join-Path $Root 'channels\whatsapp-baileys\plugin.ts')
 $dashboardPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\dashboard-api.ts')
 $companionPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\companion-api.ts')
+$presetRoot = To-AbsoluteYamlPath (Join-Path $Root 'profiles\local\.agent-presets')
 
 if (-not (Test-Path $Patch)) {
   Copy-Item -LiteralPath $Template -Destination $Patch
 }
 $patchText = Get-Content $Patch -Raw
+$newline = if ($patchText.Contains("`r`n")) { "`r`n" } else { "`n" }
 $patchText = $patchText.Replace('__ELARA_ACCESS_PLUGIN_PATH__', $accessPath)
+$patchText = $patchText.Replace('__ELARA_CONTROL_PLUGIN_PATH__', $controlPath)
+if ($patchText -notmatch 'id:\s*elara-access' -or $patchText -notmatch 'id:\s*elara-control') {
+  $inserted = $false
+  foreach ($candidateNewline in @("`r`n", "`n")) {
+    $coreEntry = "    - id: elara-core${candidateNewline}"
+    if (-not $patchText.Contains($coreEntry)) { continue }
+    $entries = ''
+    if ($patchText -notmatch 'id:\s*elara-access') {
+      $entries += "    - id: elara-access${candidateNewline}      name: '$accessPath'${candidateNewline}"
+    }
+    if ($patchText -notmatch 'id:\s*elara-control') {
+      $entries += "    - id: elara-control${candidateNewline}      name: '$controlPath'${candidateNewline}"
+    }
+    $patchText = $patchText.Replace($coreEntry, "${entries}${coreEntry}")
+    $inserted = $true
+    break
+  }
+  if (-not $inserted) {
+    throw 'Existing local Cordis patch has no elara-core insertion anchor for access and control services'
+  }
+}
 $patchText = $patchText.Replace('__ELARA_CORE_PLUGIN_PATH__', $corePath)
 $patchText = $patchText.Replace('__ELARA_MEMORY_PLUGIN_PATH__', $memoryPath)
 $patchText = $patchText.Replace('__ELARA_WINDOWS_PLUGIN_PATH__', $windowsPath)
 $patchText = $patchText.Replace('__ELARA_WHATSAPP_PLUGIN_PATH__', $whatsappPath)
 $patchText = $patchText.Replace('__ELARA_DASHBOARD_PLUGIN_PATH__', $dashboardPath)
 $patchText = $patchText.Replace('__ELARA_COMPANION_PLUGIN_PATH__', $companionPath)
+$patchText = $patchText.Replace('__ELARA_PRESET_ROOT__', $presetRoot)
+if ($patchText -notmatch '(?m)^- id: agent-presets\s*$') {
+  $patchText += "${newline}- id: agent-presets${newline}  config:${newline}    default: elara${newline}    roots:${newline}      - path: '$presetRoot'${newline}        trust: system${newline}"
+}
 if ($patchText -notmatch 'id:\s*elara-access') {
   throw 'Existing local Cordis patch does not load elara-access; edit it explicitly before starting managed channels'
+}
+if ($patchText -notmatch 'id:\s*elara-control') {
+  throw 'Existing local Cordis patch does not load elara-control; edit it explicitly before starting managed channels'
 }
 Set-Content -Path $Patch -Value $patchText -Encoding utf8
 

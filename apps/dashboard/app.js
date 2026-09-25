@@ -126,20 +126,74 @@ async function loadSessions() {
   try {
     const data = await apiGet('/sessions');
     const tbody = document.getElementById('sessions-tbody');
-    tbody.innerHTML = data.sessions.map(s => `
-      <tr>
-        <td>${s.id}</td>
-        <td>${s.status}</td>
-        <td>${s.provider || '-'}</td>
-        <td>${s.model || '-'}</td>
-      </tr>
-    `).join('');
+    tbody.replaceChildren();
+    for (const s of data.sessions) {
+      const row = document.createElement('tr');
+      for (const value of [s.id, s.status, s.provider || '-', s.model || '-']) {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.append(cell);
+      }
+      const actions = document.createElement('td');
+      const stop = document.createElement('button');
+      stop.textContent = 'Stop';
+      stop.addEventListener('click', () => void requestStop(s.id));
+      const audit = document.createElement('button');
+      audit.textContent = 'Audit';
+      audit.addEventListener('click', () => void loadAudit(s.id));
+      actions.append(stop, audit);
+      row.append(actions);
+      tbody.append(row);
+    }
     document.getElementById('overview-sessions').innerHTML = `
       <div class="data-item"><span class="data-label">Active Agents</span><span class="data-value">${data.sessions.length}</span></div>
     `;
   } catch (e) {
     console.error(e);
   }
+}
+
+let auditCursor;
+let auditSession;
+async function loadAudit(sessionId, more = false) {
+  try {
+    if (!more || auditSession !== sessionId) {
+      auditSession = sessionId;
+      auditCursor = undefined;
+      document.getElementById('session-audit').textContent = '';
+    }
+    const suffix = auditCursor ? `?cursor=${auditCursor}` : '';
+    const { events, nextCursor } = await apiGet(`/sessions/${encodeURIComponent(sessionId)}/audit${suffix}`);
+    for (const entry of events) {
+      document.getElementById('session-audit').textContent +=
+        `${new Date(entry.createdAt).toLocaleString()} ${entry.eventType} ${entry.outcome} ${entry.reasonCode} ${entry.toolName || entry.capabilityId || ''}\n`;
+    }
+    auditCursor = nextCursor;
+    document.getElementById('audit-more').hidden = !nextCursor || events.length < 50;
+  } catch {
+    document.getElementById('session-control-status').textContent = 'Audit is unavailable.';
+  }
+}
+document.getElementById('audit-more').addEventListener('click', () => {
+  if (auditSession) void loadAudit(auditSession, true);
+});
+
+async function requestStop(sessionId) {
+  const status = document.getElementById('session-control-status');
+  try {
+    const stop = await apiPost(`/sessions/${encodeURIComponent(sessionId)}/stop`, {});
+    status.textContent = `Stop requested for ${sessionId}: ${stop.outcome}.`;
+    if (stop.outcome !== 'stopping') return;
+    const poll = async () => {
+      try {
+        const current = await apiGet(`/stops/${encodeURIComponent(stop.stopRequestId)}`);
+        status.textContent = `Stop ${current.id}: ${current.outcome}.`;
+        if (current.outcome === 'stopping') setTimeout(poll, 1000);
+        else { void loadSessions(); void loadAudit(sessionId); }
+      } catch { status.textContent = 'Stop status is unavailable.'; }
+    };
+    setTimeout(poll, 1000);
+  } catch { status.textContent = 'Stop request was not accepted.'; }
 }
 
 async function loadTools() {
@@ -235,7 +289,13 @@ function connectSSE() {
     const time = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
     const item = document.createElement('div');
     item.className = 'timeline-item';
-    item.innerHTML = `<div class="timeline-time">${time}</div><div class="timeline-content">${content}</div>`;
+    const stamp = document.createElement('div');
+    stamp.className = 'timeline-time';
+    stamp.textContent = time;
+    const body = document.createElement('div');
+    body.className = 'timeline-content';
+    body.textContent = content;
+    item.append(stamp, body);
     timeline.prepend(item);
   }
 
@@ -246,19 +306,19 @@ function connectSSE() {
   evtSource.addEventListener('tool.completed', e => {
     const data = JSON.parse(e.data);
     addLog(`TOOL: ${data.tool} | Success: ${!data.isError}`);
-    addTimeline(`<strong>Tool executed:</strong> ${data.tool}<br/>${data.isError ? 'Error: ' + data.error : 'Success'}`);
+    addTimeline(`Tool executed: ${data.tool} — ${data.isError ? 'Error' : 'Success'}`);
   });
   
   evtSource.addEventListener('chat.sent', e => {
     const data = JSON.parse(e.data);
     addLog(`CHAT SEND [${data.sessionId}]: ${data.message}`);
-    addTimeline(`<strong>User Message</strong> (${data.sessionId})`);
+    addTimeline(`User Message (${data.sessionId})`);
   });
 
   evtSource.addEventListener('chat.response', e => {
     const data = JSON.parse(e.data);
     addLog(`CHAT RESPONSE [${data.sessionId}]: ${data.message}`);
-    addTimeline(`<strong>Model Response</strong> (${data.sessionId})`);
+    addTimeline(`Model Response (${data.sessionId})`);
     appendChat('elara', data.message);
   });
 

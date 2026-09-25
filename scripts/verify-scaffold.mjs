@@ -12,6 +12,7 @@ const required = [
   'docs/UPSTREAM.md',
   'plugins/elara-core.ts',
   'plugins/windows-tools.ts',
+  'plugins/elara-control.ts',
   'scripts/bootstrap-local.ps1',
   'scripts/run-local.ps1',
   'profiles/cordis.patch.template.yml',
@@ -42,7 +43,7 @@ for (const marker of [
 
 for (const marker of [
   "export const name = 'elara-windows-tools'",
-  "export const inject = ['tools', 'access']",
+  "export const inject = ['tools', 'access', 'control']",
   'elara_windows_status',
   'executeReviewedWindowsTool',
 ]) {
@@ -51,11 +52,13 @@ for (const marker of [
 
 for (const marker of [
   '__ELARA_ACCESS_PLUGIN_PATH__',
+  '__ELARA_CONTROL_PLUGIN_PATH__',
   '__ELARA_CORE_PLUGIN_PATH__',
   '__ELARA_WINDOWS_PLUGIN_PATH__',
   '__ELARA_WHATSAPP_PLUGIN_PATH__',
   '__ELARA_DASHBOARD_PLUGIN_PATH__',
   '__ELARA_COMPANION_PLUGIN_PATH__',
+  '__ELARA_PRESET_ROOT__',
 ]) {
   if (!patch.includes(marker)) throw new Error(`Patch missing bootstrap marker: ${marker}`)
 }

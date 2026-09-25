@@ -3,21 +3,32 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { executeLocalTool, POLICY } from './windows-tools-local.ts'
 import type { DirectExecutionRequest } from './elara-access.ts'
 import { executionRoute } from '../packages/policy/evaluate.ts'
+import type {} from './elara-control.ts'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SessionAdmission } from '../packages/policy/contracts.ts'
 
 export const name = 'elara-windows-tools'
-export const inject = ['tools', 'access']
+export const inject = ['tools', 'access', 'control']
 export { POLICY }
 
-async function route(ctx: Context, name: string, args: unknown, target: string): Promise<string> {
+async function route(ctx: Context, name: string, args: unknown, target: string, signal?: AbortSignal,
+  agent?: Agent, admission?: SessionAdmission): Promise<string> {
+  if (signal?.aborted) throw new Error('CANCELLED_BEFORE_DISPATCH')
   const kind = ctx.access.deviceKind(target)
   const destination = executionRoute(process.env.ELARA_MODE, kind)
   let result: any
   if (destination === 'companion') {
     const companion = (ctx as any).companion
     if (!companion) throw new Error('COMPANION_UNAVAILABLE')
-    result = await companion.executeTool(name, args, target)
+    const onAbort = () => {
+      if (admission) ctx.control.markDirectUnconfirmed(admission)
+      else ctx.control.markUnconfirmed(agent)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try { result = await companion.executeTool(name, args, target) }
+    finally { signal?.removeEventListener('abort', onAbort) }
   } else {
-    result = await executeLocalTool(name, args)
+    result = await executeLocalTool(name, args, signal)
   }
   if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
     throw new Error(result.stderr || `Command failed: ${String(result.exitCode)}`)
@@ -27,15 +38,18 @@ async function route(ctx: Context, name: string, args: unknown, target: string):
 
 export async function executeReviewedWindowsTool(
   ctx: Context, request: DirectExecutionRequest, name: string, args: unknown,
+  admission: SessionAdmission,
 ): Promise<string> {
-  return ctx.access.executeDirect(request, () => route(ctx, name, args, request.targetDeviceId))
+  if (request.sessionId !== admission.sessionId) throw new Error('SESSION_ADMISSION_MISMATCH')
+  return ctx.control.runDirect(admission, signal => ctx.access.executeDirect({ ...request, signal },
+    () => route(ctx, name, args, request.targetDeviceId, signal, undefined, admission)))
 }
 
 export function apply(ctx: Context) {
   const run = (name: string, args: unknown, exec: ToolRunContext) => {
     const execution = ctx.access.contextForAgent(exec.agent, `tool:${name}`, exec.signal)
     if (!execution) throw new Error('SESSION_OWNER_UNTRUSTED')
-    return route(ctx, name, args, execution.targetDeviceId)
+    return ctx.control.trackLocal(exec.agent, route(ctx, name, args, execution.targetDeviceId, exec.signal, exec.agent))
   }
   const register = (name: string, description: string, parameters: any) => {
     ctx.tools.register(defineTool({
