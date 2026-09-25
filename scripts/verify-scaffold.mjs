@@ -14,7 +14,7 @@ const required = [
   'plugins/windows-tools.ts',
   'scripts/bootstrap-local.ps1',
   'scripts/run-local.ps1',
-  'profiles/local/cordis.patch.yml',
+  'profiles/cordis.patch.template.yml',
 ]
 
 const missing = required.filter((path) => !existsSync(join(root, path)))
@@ -29,11 +29,11 @@ if (pkg.packageManager !== 'pnpm@11.7.0') throw new Error('Unexpected pnpm pin')
 
 const core = readFileSync(join(root, 'plugins/elara-core.ts'), 'utf8')
 const win = readFileSync(join(root, 'plugins/windows-tools.ts'), 'utf8')
-const patch = readFileSync(join(root, 'profiles/local/cordis.patch.yml'), 'utf8')
+const patch = readFileSync(join(root, 'profiles/cordis.patch.template.yml'), 'utf8')
 
 for (const marker of [
   "export const name = 'elara-core'",
-  "export const inject = ['tools']",
+  "export const inject = ['tools', 'memory', 'access']",
   'defineTool',
   'elara_about',
 ]) {
@@ -42,19 +42,23 @@ for (const marker of [
 
 for (const marker of [
   "export const name = 'elara-windows-tools'",
-  "export const inject = ['tools']",
+  "export const inject = ['tools', 'access']",
   'elara_windows_status',
-  'powershell.exe',
+  'executeReviewedWindowsTool',
 ]) {
   if (!win.includes(marker)) throw new Error(`Windows plugin missing marker: ${marker}`)
 }
 
 for (const marker of [
+  '__ELARA_ACCESS_PLUGIN_PATH__',
   '__ELARA_CORE_PLUGIN_PATH__',
   '__ELARA_WINDOWS_PLUGIN_PATH__',
+  '__ELARA_WHATSAPP_PLUGIN_PATH__',
+  '__ELARA_DASHBOARD_PLUGIN_PATH__',
+  '__ELARA_COMPANION_PLUGIN_PATH__',
 ]) {
   if (!patch.includes(marker)) throw new Error(`Patch missing bootstrap marker: ${marker}`)
 }
 
 console.log('ELARA scaffold verification: PASS')
-console.log('Static validation only: upstream DSH runtime was not built in this environment.')
+console.log('Template validation only: this does not inspect or change the local runtime patch.')

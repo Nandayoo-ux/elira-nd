@@ -28,6 +28,11 @@
     </nav>
 
     <main class="content">
+      <section id="pending-approvals" class="card" hidden aria-live="polite">
+        <h2>Pending approvals</h2>
+        <p>Review the exact action and device before allowing it once.</p>
+        <div id="approval-items"></div>
+      </section>
       <div id="view-overview" class="view active">
         <header><h2>Overview</h2></header>
         <div class="grid">
@@ -87,6 +92,9 @@
         <header><h2>Projects</h2></header>
         <div class="card">
           <h3>Workspace Actions</h3>
+          <label for="project-session-id">Dashboard session</label>
+          <input id="project-session-id" type="text" placeholder="Session ID">
+          <button id="project-new-session" type="button">Create session</button>
           <div class="actions">
             <button class="btn-action" data-action="typecheck">Run Typecheck</button>
             <button class="btn-action" data-action="test">Run Tests</button>

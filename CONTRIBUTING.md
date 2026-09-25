@@ -1,6 +1,6 @@
 # Contributing to ELARA
 
-ELARA is built on top of DeepSeek Harness rather than reimplementing the harness core.
+ELARA is built by Tan.
 
 ## Before coding
 
@@ -11,7 +11,7 @@ ELARA is built on top of DeepSeek Harness rather than reimplementing the harness
 
 ## Attribution
 
-When an ELARA feature is derived from or depends on DeepSeek Harness behavior, document that relationship in code or the relevant README. Do not present ELARA as an official DeepSeek product.
+When an ELARA feature is derived from or depends by Tan behavior, document that relationship in code or the relevant README. Do not present ELARA as an official Tan product.
 
 ## Upstream changes
 

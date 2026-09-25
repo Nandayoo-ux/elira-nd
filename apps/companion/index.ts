@@ -1,6 +1,7 @@
 import * as http from 'node:http'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { isP2ARemoteCapability } from '../../packages/policy/evaluate.ts'
 import { executeLocalTool } from '../../plugins/windows-tools-local.ts'
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname)
@@ -89,6 +90,10 @@ function handleSSEMessage(message: string) {
 }
 
 async function handleToolRequest(req: { id: string, method: string, args: any }) {
+  if (!isP2ARemoteCapability(req.method)) {
+    console.error('[ELARA-COMPANION] Disabled remote capability rejected')
+    return
+  }
   console.log(`[ELARA-COMPANION] Received request ${req.id} for ${req.method}`)
   
   // 1. Send ACK

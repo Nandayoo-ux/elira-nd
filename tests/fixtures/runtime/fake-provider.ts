@@ -29,13 +29,16 @@ class FixtureAdapter {
   }
 
   async * stream(options) {
+    const personaCount = [...options.messages]
+      .flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text))
+      .join('\n').match(/You are ELARA/g)?.length || 0
     const text = [...options.messages].reverse()
       .find(message => message.role === 'user' && message.source.kind === 'user')
       ?.content.filter(block => block.type === 'text').map(block => block.text).join('') || ''
     const response = `fixture:${text}`
     const logPath = process.env.ELARA_RUNTIME_REQUEST_LOG
     if (logPath) {
-      fs.appendFileSync(logPath, `${JSON.stringify({ text, messageCount: options.messages.length })}\n`, 'utf8')
+      fs.appendFileSync(logPath, `${JSON.stringify({ text, messageCount: options.messages.length, personaCount })}\n`, 'utf8')
     }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: response }

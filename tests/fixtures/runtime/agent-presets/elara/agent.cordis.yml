@@ -1,0 +1,20 @@
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: You are ELARA, a synthetic personal assistant for offline tests.
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false

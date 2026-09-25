@@ -1,4 +1,4 @@
-const API_BASE = 'http://127.0.0.1:31337/api';
+const API_BASE = `${location.origin}/api`;
 
 let token = localStorage.getItem('elara_dashboard_token') || '';
 
@@ -47,6 +47,42 @@ async function apiPost(path, body) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+
+let approvalRefreshRunning = false;
+async function loadApprovals() {
+  if (!token || approvalRefreshRunning) return;
+  approvalRefreshRunning = true;
+  const panel = document.getElementById('pending-approvals');
+  const items = document.getElementById('approval-items');
+  try {
+    const { approvals } = await apiGet('/approvals');
+    items.replaceChildren();
+    panel.hidden = approvals.length === 0;
+    for (const approval of approvals) {
+      const entry = document.createElement('div');
+      const title = document.createElement('h3');
+      title.textContent = `${approval.toolName} on ${approval.targetDeviceId}`;
+      const details = document.createElement('pre');
+      details.textContent = `Session: ${approval.sessionId}\nExpires: ${new Date(approval.expiresAt).toLocaleTimeString()}\n${approval.details}`;
+      entry.append(title, details);
+      for (const [label, allow] of [['Allow once', true], ['Reject', false]]) {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+          entry.querySelectorAll('button').forEach(item => { item.disabled = true; });
+          try { await apiPost('/approvals/answer', { id: approval.id, allow }); }
+          catch { title.textContent = 'Approval unavailable or expired'; }
+          finally { void loadApprovals(); }
+        });
+        entry.append(button);
+      }
+      items.append(entry);
+    }
+  } catch { panel.hidden = true; items.replaceChildren(); }
+  finally { approvalRefreshRunning = false; }
+}
+setInterval(loadApprovals, 1500);
+void loadApprovals();
 
 // Load Data
 async function loadStatus() {
@@ -152,13 +188,24 @@ document.getElementById('chat-send').addEventListener('click', async () => {
 });
 
 // Projects
+document.getElementById('project-new-session').addEventListener('click', async () => {
+  const output = document.getElementById('project-output');
+  try {
+    const { sessionId } = await apiPost('/sessions', {});
+    document.getElementById('project-session-id').value = sessionId;
+    document.getElementById('chat-session-id').value = sessionId;
+    output.innerText = `Session ready: ${sessionId}\n`;
+    void loadSessions();
+  } catch (error) { output.innerText = `Could not create session: ${error.message}`; }
+});
 document.querySelectorAll('.btn-action').forEach(btn => {
   btn.addEventListener('click', async (e) => {
     const action = e.target.dataset.action;
     const output = document.getElementById('project-output');
     output.innerText += `\n> Executing ${action}...\n`;
     try {
-      const res = await apiPost(`/project/${action}`, {});
+      const sessionId = document.getElementById('project-session-id').value.trim();
+      const res = await apiPost(`/project/${action}`, { sessionId });
       output.innerText += JSON.stringify(res.result, null, 2) + '\n';
     } catch (err) {
       output.innerText += `Error: ${err.message}\n`;

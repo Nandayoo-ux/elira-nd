@@ -1,5 +1,5 @@
 export const ACCESS_SCHEMA_VERSION = 1
-export const POLICY_VERSION = 'elara-p2a-v1.1'
+export const POLICY_VERSION = 'elara-p2b-v1'
 
 export type OriginChannel = 'whatsapp' | 'dashboard'
 export type PrincipalRole = 'operator' | 'user'

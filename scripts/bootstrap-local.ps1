@@ -6,6 +6,15 @@ $DshDir = Join-Path $Runtime 'deepseek-harness'
 $Patch = Join-Path $Root 'profiles\local\cordis.patch.yml'
 $ElaraNodeModules = Join-Path $Root 'node_modules'
 $DshNodeModules = Join-Path $DshDir 'node_modules'
+$Template = Join-Path $Root 'profiles\cordis.patch.template.yml'
+$PinnedCommit = (Get-Content (Join-Path $Root 'integrations\deepseek-harness\upstream.json') -Raw | ConvertFrom-Json).commit
+
+function Invoke-Native([string]$Name, [string[]]$Arguments) {
+  & $Name @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Native command failed with exit code $LASTEXITCODE`: $Name $($Arguments -join ' ')"
+  }
+}
 
 function Require-Command([string]$Name) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -44,20 +53,26 @@ $env:PATH = "$RuntimeBin;$env:PATH"
 if (-not (Test-Path $DshDir)) {
   New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
   Write-Host "[ELARA] Cloning official DeepSeek Harness..."
-  git clone https://github.com/deepseek-ai/deepseek-harness.git $DshDir
+  Invoke-Native 'git' @('clone', 'https://github.com/deepseek-ai/deepseek-harness.git', $DshDir)
 } else {
   Write-Host "[ELARA] Using existing DSH checkout: $DshDir"
+}
+
+$upstreamCommit = (& git -C $DshDir rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or -not $upstreamCommit) { throw 'Could not identify the DSH checkout revision' }
+$upstreamCommit = $upstreamCommit.Trim()
+if ($upstreamCommit -ne $PinnedCommit) {
+  throw 'DSH checkout differs from the pinned revision; bootstrap will not reset, pull, or checkout over it'
 }
 
 Push-Location $DshDir
 try {
   Write-Host "[ELARA] Installing DSH dependencies with pnpm 11.7.0..."
-  pnpm install
+  Invoke-Native 'pnpm' @('install')
 
   Write-Host "[ELARA] Building DSH..."
-  pnpm run build
+  Invoke-Native 'pnpm' @('run', 'build')
 
-  $upstreamCommit = (& git rev-parse HEAD).Trim()
   Set-Content -Path (Join-Path $Root '.runtime\dsh-commit.txt') -Value $upstreamCommit -Encoding utf8
   Write-Host "[ELARA] Upstream DSH commit: $upstreamCommit"
 } finally {
@@ -88,15 +103,27 @@ function To-AbsoluteYamlPath([string]$Path) {
 }
 
 $corePath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-core.ts')
+$accessPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-access.ts')
+$memoryPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\elara-memory.ts')
 $windowsPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\windows-tools.ts')
 $whatsappPath = To-AbsoluteYamlPath (Join-Path $Root 'channels\whatsapp-baileys\plugin.ts')
 $dashboardPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\dashboard-api.ts')
+$companionPath = To-AbsoluteYamlPath (Join-Path $Root 'plugins\companion-api.ts')
 
+if (-not (Test-Path $Patch)) {
+  Copy-Item -LiteralPath $Template -Destination $Patch
+}
 $patchText = Get-Content $Patch -Raw
+$patchText = $patchText.Replace('__ELARA_ACCESS_PLUGIN_PATH__', $accessPath)
 $patchText = $patchText.Replace('__ELARA_CORE_PLUGIN_PATH__', $corePath)
+$patchText = $patchText.Replace('__ELARA_MEMORY_PLUGIN_PATH__', $memoryPath)
 $patchText = $patchText.Replace('__ELARA_WINDOWS_PLUGIN_PATH__', $windowsPath)
 $patchText = $patchText.Replace('__ELARA_WHATSAPP_PLUGIN_PATH__', $whatsappPath)
 $patchText = $patchText.Replace('__ELARA_DASHBOARD_PLUGIN_PATH__', $dashboardPath)
+$patchText = $patchText.Replace('__ELARA_COMPANION_PLUGIN_PATH__', $companionPath)
+if ($patchText -notmatch 'id:\s*elara-access') {
+  throw 'Existing local Cordis patch does not load elara-access; edit it explicitly before starting managed channels'
+}
 Set-Content -Path $Patch -Value $patchText -Encoding utf8
 
 Write-Host "[ELARA] Local bootstrap complete."

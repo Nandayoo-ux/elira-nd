@@ -2,6 +2,7 @@ import { after, before, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
+import * as http from 'node:http'
 import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -23,6 +24,7 @@ const managedEnvironment = [
   'ELARA_MODE',
   'ELARA_MOCK_WA', 'ELARA_DASHBOARD_PORT', 'ELARA_DASHBOARD_TOKEN',
   'ELARA_RUNTIME_REQUEST_LOG', 'ELARA_RUNTIME_DISPOSE_MARKER',
+  'ELARA_TRANSCRIPTION_BASE_URL',
 ]
 const previousEnvironment = Object.fromEntries(managedEnvironment.map(name => [name, process.env[name]]))
 
@@ -33,7 +35,11 @@ let applyWhatsAppPlugin
 let ToolCallId
 let RuntimeSessionId
 const sent = []
+const presence = []
+const typing = []
 let stopSentListener = () => {}
+let stopPresenceListener = () => {}
+let stopTypingListener = () => {}
 
 class FixturePluginContext {
   events = new EventEmitter()
@@ -97,9 +103,13 @@ function waitFor(predicate, label, timeoutMs = 15_000) {
 }
 
 function emitMessage(jid, id, text) {
+  emitStructuredMessage(jid, id, { conversation: text })
+}
+
+function emitStructuredMessage(jid, id, message) {
   ctx.emit('elara/test-whatsapp-upsert', {
     type: 'notify',
-    messages: [{ key: { remoteJid: jid, id, fromMe: false }, message: { conversation: text } }],
+    messages: [{ key: { remoteJid: jid, id, fromMe: false }, message }],
   })
 }
 
@@ -143,6 +153,11 @@ before(async () => {
         id: 'fixture-user-b', role: 'user', enabled: true,
         channelAliases: { whatsapp: ['user-b@s.whatsapp.net'] },
         allowedDeviceIds: ['fixture-companion'],
+      },
+      {
+        id: 'fixture-user-c', role: 'user', enabled: true,
+        channelAliases: { whatsapp: ['user-c@s.whatsapp.net'] },
+        allowedDeviceIds: ['fixture-local', 'fixture-companion'],
       },
       {
         id: 'fixture-operator', role: 'operator', enabled: true,
@@ -231,7 +246,7 @@ before(async () => {
       { id: 'fixture-provider', name: pluginUrl('tests/fixtures/runtime/fake-provider.ts') },
       { id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: {
         default: 'elara',
-        roots: [{ path: path.join(repositoryRoot, 'profiles', 'local', '.agent-presets'), trust: 'system' }],
+        roots: [{ path: path.join(repositoryRoot, 'tests', 'fixtures', 'runtime', 'agent-presets'), trust: 'system' }],
         includeShippedRoot: false,
         includeUserRoot: false,
       } },
@@ -259,6 +274,8 @@ before(async () => {
     },
   )
   stopSentListener = ctx.on('elara/test-whatsapp-sent', payload => { sent.push(payload) })
+  stopPresenceListener = ctx.on('elara/test-whatsapp-presence', payload => { presence.push(payload) })
+  stopTypingListener = ctx.on('elara/test-whatsapp-typing-delay', payload => { typing.push(payload) })
   await waitFor(async () => {
     try {
       const response = await fetch(`${dashboardUrl}/api/status`, {
@@ -275,6 +292,8 @@ after(async () => {
   await verifyThenCleanup({
     verify: async () => {
       stopSentListener()
+      stopPresenceListener()
+      stopTypingListener()
       await ctx?.fiber.dispose()
       if (ctx) {
         assert.equal(fs.readFileSync(disposeMarker, 'utf8').trim(), 'disposed')
@@ -368,7 +387,7 @@ describe('offline DSH-loader composition', () => {
     assert.equal(fs.existsSync(failureRoot), false)
   })
 
-  test('mounts the real ELARA preset through the DSH roster', async () => {
+  test('mounts the synthetic ELARA preset through the DSH roster', async () => {
     const preset = await ctx.agentPresets.resolve('elara')
     assert.equal(preset.id, 'elara')
     const key = await ctx.agentPresets.standingKeyFor('elara')
@@ -402,6 +421,7 @@ describe('offline DSH-loader composition', () => {
     assert.equal(sent.filter(item => item.remoteJid === 'group@g.us').length, 0)
     assert.equal(sent.filter(item => item.remoteJid === 'user-a@s.whatsapp.net').length, 1)
     assert.equal(requestRows().length, initialRequests + 1)
+    assert.equal(requestRows().at(-1).personaCount, 1, 'fixture persona must appear once in the model request')
   })
 
   test('unknown WhatsApp senders cannot trigger a reply, model request, or session', async () => {
@@ -438,6 +458,15 @@ describe('offline DSH-loader composition', () => {
     await waitFor(() => sent.filter(item => item.remoteJid === 'user-a@s.whatsapp.net').length === 2, 'reused-session response')
     assert.equal(ctx.agents.get(userAId), firstAgent)
     assert.ok(requestRows().at(-1).messageCount > before)
+  })
+
+  test('distinct WhatsApp message IDs with identical text both reach the agent', async () => {
+    const before = requestRows().length
+    emitMessage('user-a@s.whatsapp.net', 'same-text-one', 'same fixture text')
+    emitMessage('user-a@s.whatsapp.net', 'same-text-two', 'same fixture text')
+    await waitFor(() => requestRows().length >= before + 2, 'both identical-text requests')
+    assert.deepEqual(requestRows().slice(before, before + 2).map(row => row.text),
+      ['same fixture text', 'same fixture text'])
   })
 
   test('a later pre-execute listener cannot override the final sensitive-operation denial', async () => {
@@ -691,5 +720,224 @@ describe('offline DSH-loader composition', () => {
     const body = await response.json()
     assert.equal(body.decision, 'approval_required')
     assert.equal(body.reasonCode, 'P2A_APPROVAL_REQUIRED')
+  })
+
+  test('dashboard creates an owned agent session and does not claim an unrun project action', async () => {
+    const headers = { Authorization: `Bearer ${dashboardToken}`, 'Content-Type': 'application/json' }
+    const created = await fetch(`${dashboardUrl}/api/sessions`, {
+      method: 'POST', headers, body: '{}',
+    })
+    assert.equal(created.status, 201)
+    const { sessionId } = await created.json()
+    assert.match(sessionId, /^dashboard:/)
+    assert.equal(ctx.access.bindingForSession(sessionId)?.principalId, 'fixture-operator')
+    const project = await fetch(`${dashboardUrl}/api/project/test`, {
+      method: 'POST', headers, body: JSON.stringify({ sessionId }),
+    })
+    assert.equal(project.status, 409)
+    assert.match((await project.json()).error, /did not run/)
+  })
+
+  test('P2B grants only one live DSH tool call from the owning dashboard', async () => {
+    const handle = await createLocalAgent('fixture-p2b-root')
+    const agent = handle.agent
+    const file = path.join(fixtureRoot, 'p2b-synthetic.txt')
+    const deniedFile = path.join(fixtureRoot, 'p2b-denied.txt')
+    const controller = new AbortController()
+    const headers = { Authorization: `Bearer ${dashboardToken}`, 'Content-Type': 'application/json' }
+    const begin = (callId, target) => ctx.tools.execute({
+      callId: ToolCallId(callId), name: 'write',
+      arguments: { file_path: target, content: 'synthetic approval fixture\n' },
+      agent, signal: controller.signal,
+    })
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pendingWrite = begin('fixture-p2b-write', file)
+      const first = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0], 'first approval')
+      assert.equal(first.toolName, 'write')
+      assert.equal(first.targetDeviceId, 'fixture-local')
+      assert.equal(ctx.access.answerApproval(first.id, 'fixture-user-a', 'dashboard', true), false)
+      const listResponse = await fetch(`${dashboardUrl}/api/approvals`, { headers })
+      assert.equal(listResponse.status, 200)
+      assert.ok((await listResponse.json()).approvals.some(item => item.id === first.id))
+      const approved = await fetch(`${dashboardUrl}/api/approvals/answer`, {
+        method: 'POST', headers, body: JSON.stringify({ id: first.id, allow: true }),
+      })
+      assert.equal(approved.status, 200)
+      assert.equal(ctx.access.answerApproval(first.id, 'fixture-operator', 'dashboard', true), false)
+      // DSH's own sandbox may ask separately for the same call. It must still
+      // receive an explicit answer through the owning dashboard.
+      let settled = false
+      void pendingWrite.finally(() => { settled = true })
+      for (let round = 0; round < 3 && !settled; round++) {
+        const next = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0] || settled,
+          'sandbox approval or completion', 3_000)
+        if (next !== true) ctx.access.answerApproval(next.id, 'fixture-operator', 'dashboard', true)
+      }
+      const result = await pendingWrite
+      assert.equal(result.isError, false, result.error?.message)
+      assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic approval fixture\n')
+
+      const pendingDenied = begin('fixture-p2b-denied', deniedFile)
+      const denied = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0], 'rejection approval')
+      assert.equal(ctx.access.answerApproval(denied.id, 'fixture-operator', 'dashboard', false), true)
+      assert.equal((await pendingDenied).isError, true)
+      assert.equal(fs.existsSync(deniedFile), false)
+      assert.equal(ctx.access.answerApproval(denied.id, 'fixture-operator', 'dashboard', true), false)
+
+      const scopeFile = path.join(fixtureRoot, 'p2b-changed-scope.txt')
+      const changing = begin('fixture-p2b-changing-scope', scopeFile)
+      const scopeQuestion = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0],
+        'changed-scope approval')
+      const defaults = ctx.access.state.config.authorities.channelDefaultDeviceIds
+      const originalTarget = defaults.dashboard
+      defaults.dashboard = 'fixture-companion'
+      try {
+        assert.equal(ctx.access.answerApproval(scopeQuestion.id, 'fixture-operator', 'dashboard', true), true)
+        assert.equal((await changing).isError, true)
+        assert.equal(fs.existsSync(scopeFile), false)
+      } finally {
+        defaults.dashboard = originalTarget
+      }
+    } finally {
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('WhatsApp approval replies release only the matching pending tool call', async () => {
+    const defaults = ctx.access.state.config.authorities.channelDefaultDeviceIds
+    const previousTarget = defaults.whatsapp
+    defaults.whatsapp = 'fixture-local'
+    const jid = 'user-c@s.whatsapp.net'
+    const sessionId = `whatsapp:${jid}`
+    const sentBefore = sent.length
+    emitMessage(jid, 'fixture-whatsapp-approval-seed', 'hello approval fixture')
+    await waitFor(() => sent.length > sentBefore && ctx.agents.get(RuntimeSessionId(sessionId)), 'authorized WhatsApp seed')
+    const agent = ctx.agents.get(RuntimeSessionId(sessionId))
+    const file = path.join(fixtureRoot, 'p2b-whatsapp-synthetic.txt')
+    const controller = new AbortController()
+    agent.session.append('turn/start', { turn: 2 })
+    try {
+      const pending = ctx.tools.execute({ callId: ToolCallId('fixture-whatsapp-write'), name: 'write',
+        arguments: { file_path: file, content: 'synthetic WhatsApp grant\n' },
+        agent, signal: controller.signal })
+      const question = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0], 'WhatsApp approval')
+      await waitFor(() => sent.find(item => item.remoteJid === jid && item.text.includes(question.id)), 'approval message')
+      emitMessage('user-a@s.whatsapp.net', 'fixture-wrong-owner-approval', `.approve ${question.id}`)
+      await waitFor(() => sent.find(item => item.remoteJid === 'user-a@s.whatsapp.net'
+        && item.text?.includes('tidak tersedia')), 'wrong-owner rejection')
+      assert.equal(ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0]?.id, question.id)
+      emitMessage(jid, 'fixture-whatsapp-approval-reply', `.approve ${question.id}`)
+      let settled = false
+      void pending.finally(() => { settled = true })
+      for (let round = 0; round < 3 && !settled; round++) {
+        const next = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0] || settled,
+          'sandbox approval or completion', 3_000)
+        if (next !== true) emitMessage(jid, `fixture-whatsapp-sandbox-${round}`, `.approve ${next.id}`)
+      }
+      const result = await pending
+      assert.equal(result.isError, false, result.error?.message)
+      assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic WhatsApp grant\n')
+      assert.equal(ctx.access.answerApproval(question.id, 'fixture-user-c', 'whatsapp', true), false)
+    } finally {
+      defaults.whatsapp = previousTarget
+      controller.abort()
+      agent.session.append('turn/end', { turn: 2, reason: { kind: 'stop' } })
+    }
+  })
+
+  test('trusted WhatsApp ingress preserves quoted context and adaptive typing lifecycle', async () => {
+    const jid = 'user-a@s.whatsapp.net'
+    const beforeSent = sent.length
+    emitStructuredMessage(jid, 'fixture-quoted-context', {
+      extendedTextMessage: {
+        text: 'bagian mana yang perlu dicek?',
+        contextInfo: { quotedMessage: { imageMessage: { caption: 'diagram kiri' } } },
+      },
+    })
+    await waitFor(() => requestRows().find(row => row.text.includes('bagian mana yang perlu dicek?')),
+      'quoted provider request')
+    const quoted = requestRows().find(row => row.text.includes('bagian mana yang perlu dicek?'))
+    assert.match(quoted.text, /Jenis gambar/)
+    assert.match(quoted.text, /diagram kiri/)
+    await waitFor(() => sent.length > beforeSent, 'quoted WhatsApp reply')
+
+    const beforeTyping = typing.length
+    const beforePresence = presence.length
+    emitMessage(jid, 'fixture-short-typing', 'iya')
+    await waitFor(() => typing.length > beforeTyping, 'short typing plan')
+    const short = typing.at(-1).milliseconds
+    const longMessage = 'tolong jelaskan langkah pemeriksaan ini secara terperinci untuk proyek fixture '
+      + 'dan tunjukkan urutan yang aman untuk menjalankannya'
+    emitMessage(jid, 'fixture-long-typing', longMessage)
+    await waitFor(() => typing.length > beforeTyping + 1, 'long typing plan')
+    assert.ok(typing.at(-1).milliseconds > short)
+    await waitFor(() => presence.slice(beforePresence).filter(item => item.jid === jid && item.state === 'paused').length >= 2,
+      'typing pauses')
+    const states = presence.slice(beforePresence).filter(item => item.jid === jid).map(item => item.state)
+    assert.ok(states.includes('composing'))
+    assert.ok(states.includes('paused'))
+  })
+
+  test('trusted WhatsApp voice note reaches the configured synthetic transcription service', async () => {
+    const server = http.createServer((request, response) => {
+      assert.equal(request.method, 'POST')
+      assert.equal(request.url, '/v1/audio/transcriptions')
+      request.resume()
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ text: 'voice fixture terverifikasi' }))
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    const previous = process.env.ELARA_TRANSCRIPTION_BASE_URL
+    process.env.ELARA_TRANSCRIPTION_BASE_URL = `http://127.0.0.1:${address.port}/v1`
+    const jid = 'user-a@s.whatsapp.net'
+    try {
+      emitStructuredMessage(jid, 'fixture-voice-note', {
+        audioMessage: { ptt: true, mimetype: 'audio/ogg', __fixtureBytes: [79, 103, 103, 83, 1, 2, 3] },
+      })
+      const row = await waitFor(() => requestRows().find(item => item.text.includes('voice fixture terverifikasi')),
+        'voice transcript in provider request')
+      assert.match(row.text, /Transkripsi voice note/)
+      await waitFor(() => sent.find(item => item.remoteJid === jid && item.text?.includes('voice fixture terverifikasi')),
+        'voice note reply')
+    } finally {
+      if (previous === undefined) delete process.env.ELARA_TRANSCRIPTION_BASE_URL
+      else process.env.ELARA_TRANSCRIPTION_BASE_URL = previous
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  test('WhatsApp memory commands isolate principals and reset only the requesting session', async () => {
+    const a = 'user-a@s.whatsapp.net'
+    const b = 'user-b@s.whatsapp.net'
+    emitMessage(a, 'fixture-remember-a', '.remember fixture aprikot biru')
+    await waitFor(() => ctx.memory.list('fixture-user-a').some(row => row.content.includes('aprikot biru')),
+      'principal-a memory')
+    emitMessage(b, 'fixture-memory-list-b', '.memories')
+    await waitFor(() => sent.find(item => item.remoteJid === b && item.text === 'belum ada ingatan'),
+      'principal-b empty memory')
+    assert.deepEqual(ctx.memory.list('fixture-user-b'), [])
+    emitMessage(a, 'fixture-memory-list-a', '.memories')
+    await waitFor(() => sent.find(item => item.remoteJid === a && item.text?.includes('fixture aprikot biru')),
+      'principal-a memory reply')
+
+    const oldSession = `whatsapp:${b}`
+    const beforeSent = sent.length
+    emitMessage(b, 'fixture-session-reset-b', '.new')
+    await waitFor(() => sent.length > beforeSent && sent.at(-1).remoteJid === b
+      && sent.at(-1).text?.includes('konteks baru'), 'session reset reply')
+    const saved = JSON.parse(fs.readFileSync(path.join(fixtureRoot, '.runtime', 'whatsapp-sessions.json'), 'utf8'))
+    const newSession = Object.values(saved).find(value => typeof value === 'string' && value !== oldSession)
+    assert.match(newSession, /^whatsapp:[a-f0-9]{24}:/)
+    assert.equal(ctx.access.bindingForSession(newSession)?.principalId, 'fixture-user-b')
+    emitMessage(b, 'fixture-session-after-reset', 'pesan setelah reset')
+    await waitFor(() => ctx.agents.get(RuntimeSessionId(newSession)), 'fresh session after reset')
+    await waitFor(() => sent.find(item => item.remoteJid === b && item.text?.includes('fixture:pesan setelah reset')),
+      'reply from fresh session')
+    assert.equal(ctx.access.bindingForSession(oldSession)?.principalId, 'fixture-user-b')
   })
 })

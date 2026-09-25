@@ -3,11 +3,12 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import { isP2ARemoteCapability } from '../packages/policy/evaluate.ts'
 
 export const name = 'companion-api'
 
 export interface CompanionService {
-  executeTool(toolName: string, args: any): Promise<any>;
+  executeTool(toolName: string, args: any, targetDeviceId: string): Promise<any>;
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -71,8 +72,10 @@ export function apply(ctx: Context) {
   }
 
   ctx.provide('companion', {
-    async executeTool(toolName: string, args: any): Promise<any> {
-      if (!connected) {
+    async executeTool(toolName: string, args: any, targetDeviceId: string): Promise<any> {
+      if (!isP2ARemoteCapability(toolName)) throw new Error('REMOTE_CAPABILITY_DISABLED')
+      if (targetDeviceId !== companionId) throw new Error('COMPANION_TARGET_MISMATCH')
+      if (!connected || clients.size === 0) {
         throw new Error('Windows Companion is currently offline.')
       }
 
@@ -232,9 +235,7 @@ export function apply(ctx: Context) {
     console.log('[ELARA-CLOUD] Companion API listening on 127.0.0.1:31338')
   })
 
-  ctx.on('dispose', () => {
-    server.close()
-  })
+  ctx.effect(() => () => { server.close() })
 }
 
 function parseJsonBody(req: http.IncomingMessage): Promise<any> {

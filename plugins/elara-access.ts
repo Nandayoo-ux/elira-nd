@@ -23,7 +23,7 @@ import {
 import { AccessStore } from '../packages/policy/store.ts'
 
 export const name = 'elara-access'
-export const inject = ['tools', 'agents']
+export const inject = ['tools', 'agents', 'approval']
 
 export interface DirectExecutionRequest {
   principalId: string
@@ -155,22 +155,11 @@ export function apply(ctx: Context) {
     return decision
   }
 
-  // P2B enables reviewed local commands and edits via WhatsApp approval buttons.
-  // All sensitive tools are approvable so users can grant permission from chat.
+  // Only reviewed host actions can use P2B. P2A search, protected reads,
+  // companion mutation, and control-plane restrictions remain in force.
   const approvableTools = new Set([
     'write', 'edit', 'pwsh', 'bash', 'run_code',
     'elara_project_test', 'elara_project_build', 'elara_project_typecheck',
-    // search & read tools that may hit protected paths
-    'glob', 'grep', 'read', 'read_image',
-    // legacy remote tools
-    'elara_fs_list', 'elara_fs_read', 'elara_fs_write', 'elara_process_exec',
-    // web & fetch
-    'web_search', 'web_fetch',
-    // agent delegation & control
-    'subagent', 'subagent_fork', 'send_message', 'interrupt_agent',
-    // memory, goals, planning, jobs, workflow, skill
-    'elara_store_memory', 'create_goal', 'update_goal', 'exit_plan_mode',
-    'todo_write', 'workflow', 'skill', 'job_output',
   ])
   function approvalScope(exec: Readonly<ToolExecution>): string | undefined {
     const decision = decisionForTool(exec, false)
@@ -178,29 +167,19 @@ export function apply(ctx: Context) {
     const principal = principalForAgent(exec.agent)
     if (exec.signal.aborted || !binding || !principal || !approvableTools.has(exec.name)
       || decision.outcome !== 'approval_required'
+      || targetFor(binding) !== state.config?.authorities.hostDeviceId
       || process.env.ELARA_MODE === 'cloud') return undefined
     return JSON.stringify({ principal: principal.id, session: exec.agent?.id,
       binding, target: targetFor(binding), policy: state.config, mode: process.env.ELARA_MODE || 'local',
       tool: exec.name, call: exec.callId, cwd: exec.agent?.session.header.cwd, args: exec.arguments })
   }
 
-  // Handle our own asks and subsequent native sandbox asks for the same live
-  // execution. A native answer does not bypass either ELARA or DSH policy.
-  // If we already granted ELARA-level approval for this execution, auto-grant
-  // the native sandbox ask instead of prompting the user a second time.
   ctx.on('approval/request', async (request, next) => {
+    const owned = ownRequests.get(request as ApprovalRequest)
     const candidates = [...liveExecutions.values()].filter(exec => exec.agent === request.agent
       && exec.callId === request.callId && exec.name === request.toolName)
-    const exec = candidates.length === 1 ? candidates[0] : undefined
+    const exec = owned?.exec ?? (candidates.length === 1 ? candidates[0] : undefined)
     if (!exec) return bindingForAgent(request.agent as Agent) ? 'unavailable' : next()
-
-    // If this execution was already approved through our inbox flow, auto-grant
-    // the native sandbox follow-up without asking the user again.
-    const existingGrant = grants.get(exec.token)
-    if (existingGrant && approvalScope(exec) === existingGrant) {
-      console.log(`[ELARA-ACCESS] Auto-granting native sandbox approval for ${exec.name} (already approved)`)
-      return 'allowed-once'
-    }
 
     const scope = approvalScope(exec)
     const binding = bindingForAgent(exec.agent)
@@ -213,6 +192,7 @@ export function apply(ctx: Context) {
       originChannel: binding.originChannel, sessionId: String(exec.agent!.id),
       targetDeviceId: targetFor(binding), toolName: exec.name, details }, request.signal ?? exec.signal)
     if (result === 'allowed-once' && approvalScope(exec) !== scope) return 'cancelled'
+    if (owned) owned.accepted = result === 'allowed-once'
     return result
   }, { prepend: true })
 
@@ -318,14 +298,18 @@ export function apply(ctx: Context) {
       const owned = { exec, accepted: false }
       ownRequests.set(request, owned)
       try {
-        if (ctx.approval) {
-           await ctx.approval.request(request)
+        const outcome = await ctx.approval.request(request)
+        if (outcome === 'allowed-once' && owned.accepted && approvalScope(exec) === scope) {
+          grants.set(exec.token, scope)
+          liveExecutions.set(exec.token, exec)
+          return await next()
         }
-        if (!owned.accepted) return { kind: 'deny' as const, reason: 'Approval request expired or denied without response' }
-        return next()
       } catch {
-        return { kind: 'deny' as const, reason: 'Approval flow aborted' }
+        // Missing active turn or failed audit cannot issue a grant.
+      } finally {
+        ownRequests.delete(request)
       }
+      return { kind: 'deny' as const, reason: denialText(decision) }
     }
     return { kind: 'deny' as const, reason: denialText(decision) }
   })

@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'elara-core'
-export const inject = ['tools', 'memory']
+export const inject = ['tools', 'memory', 'access']
 
 export function apply(ctx: Context) {
   ctx.tools.register(defineTool({
@@ -52,9 +52,11 @@ export function apply(ctx: Context) {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const payload = args as { content: string; type: 'personal' | 'project'; importance?: number };
-      const id = ctx.memory.remember(payload.type, payload.content, 'llm', payload.importance || 1);
+      const execution = ctx.access.contextForAgent(exec.agent, 'tool:elara_store_memory', exec.signal)
+      if (!execution) throw new Error('SESSION_OWNER_UNTRUSTED')
+      const id = ctx.memory.remember(execution.principalId, payload.type, payload.content, 'llm', payload.importance || 1);
       return `Memory stored with ID ${id}`;
     },
   }))

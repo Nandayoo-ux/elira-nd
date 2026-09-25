@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "policyVersion": "elara-p2a-v1.1",
+  "policyVersion": "elara-p2b-v1",
   "devices": [
     { "id": "local-windows", "kind": "local", "enabled": true },
     { "id": "companion-example", "kind": "companion", "enabled": false }

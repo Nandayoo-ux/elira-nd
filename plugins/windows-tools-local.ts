@@ -7,7 +7,7 @@ import os from 'node:os'
 const execFileAsync = promisify(execFile)
 
 export const POLICY = {
-  workspaceRoots: [process.cwd()],
+  get workspaceRoots() { return [path.resolve(process.env.ELARA_ROOT || process.cwd())] },
   maxReadBytes: 1024 * 1024,       // 1MB
   maxWriteBytes: 10 * 1024 * 1024, // 10MB
   maxOutputBytes: 1024 * 1024,     // 1MB
@@ -84,10 +84,7 @@ async function resolveSafePath(targetPath: string): Promise<string> {
 }
 
 async function safeExec(cmd: string, args: string[], cwdStr?: string): Promise<{ ok: boolean, exitCode: number | null, stdout: string, stderr: string, durationMs: number }> {
-    let cwd = process.cwd();
-    if (cwdStr) {
-      cwd = await resolveSafePath(cwdStr);
-    }
+    const cwd = await resolveSafePath(cwdStr || POLICY.workspaceRoots[0]);
     
     return new Promise((resolve) => {
         let stdout = '';
@@ -120,6 +117,21 @@ async function safeExec(cmd: string, args: string[], cwdStr?: string): Promise<{
             resolve({ ok: code === 0, exitCode: code, stdout, stderr, durationMs: Date.now() - startTime });
         });
     });
+}
+
+export async function resolveNpmCliEntry(): Promise<string> {
+  const explicit = process.env.ELARA_NPM_CLI
+  const candidates = explicit ? [explicit] : [
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter((candidate): candidate is string => !!candidate)
+  for (const candidate of candidates) {
+    if (path.basename(candidate).toLowerCase() !== 'npm-cli.js') continue
+    try {
+      if ((await fsPromises.stat(candidate)).isFile()) return candidate
+    } catch { /* Try the next location. */ }
+  }
+  throw new Error(`Configured npm CLI does not point to a readable file.`)
 }
 
 async function runPowerShell(script: string): Promise<string> {
@@ -217,15 +229,15 @@ $result | ConvertTo-Json -Compress
       }
 
       case 'elara_project_test': {
-        return await safeExec(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['test'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'test'], argsObj.cwd);
       }
 
       case 'elara_project_build': {
-        return await safeExec(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'build'], argsObj.cwd);
       }
 
       case 'elara_project_typecheck': {
-        return await safeExec(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'typecheck'], argsObj.cwd);
+        return await safeExec(process.execPath, [await resolveNpmCliEntry(), 'run', 'typecheck'], argsObj.cwd);
       }
 
       default:

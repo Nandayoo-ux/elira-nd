@@ -1,431 +1,584 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-agent-presets'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import pino from 'pino'
 import qrcode from 'qrcode-terminal'
+import * as crypto from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { executeReviewedWindowsTool } from '../../plugins/windows-tools.ts'
+import type { Principal } from '../../packages/policy/contracts.ts'
+import {
+  assessEmotion,
+  emotionStyleContext,
+  EMOTION_LEVEL_LABELS,
+  parseEmotionMode,
+  type EmotionMode,
+} from './emotion.ts'
+import { splitIntoBubbles } from './format.ts'
+import { combineQuotedContext, summarizeQuotedContent, type QuotedSummary } from './message-context.ts'
+import { transcribeAudio, transcriptionConfig } from './transcription.ts'
+import { parseTypingSpeed, typingDelayMs } from './typing.ts'
+
+export { splitIntoBubbles } from './format.ts'
 
 export const name = 'whatsapp-baileys'
-export const inject = ['agents', 'sessions', 'memory']
+export const inject = [
+  'agents', 'sessions', 'memory', 'agentPresets', 'agentDefaultModel', 'attachments', 'access',
+]
 
-function splitIntoBubbles(text: string, maxBubbles = 4, hardMax = 6): string[] {
-  if (!text.trim()) return []
-  
-  if (text.length < 80 && !text.includes('\n\n')) {
-    return [text.trim()]
-  }
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024
+function userKey(jid: string): string {
+  return crypto.createHash('sha256').update(jid).digest('hex').slice(0, 24)
+}
 
-  const codeBlocks: string[] = []
-  let placeholderIndex = 0
-  const textWithPlaceholders = text.replace(/```[\s\S]*?```/g, (match) => {
-    const placeholder = `\n\n__CODE_BLOCK_${placeholderIndex}__\n\n`
-    codeBlocks.push(match)
-    placeholderIndex++
-    return placeholder
-  })
+function visibleError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
-  const rawChunks = textWithPlaceholders.split(/\n\n+/).map(c => c.trim()).filter(Boolean)
-  const bubbles: string[] = []
-  
-  for (const chunk of rawChunks) {
-    let finalChunk = chunk
-    for (let i = 0; i < codeBlocks.length; i++) {
-      finalChunk = finalChunk.replace(`__CODE_BLOCK_${i}__`, codeBlocks[i])
-    }
-    if (finalChunk.trim()) {
-      bubbles.push(finalChunk.trim())
-    }
-  }
-  
-  let mergedBubbles = bubbles;
-  if (mergedBubbles.length > maxBubbles) {
-      const optimized: string[] = []
-      let current = ""
-      for (const b of mergedBubbles) {
-          if (!current) {
-              current = b;
-          } else if ((current.length + b.length) < 300) {
-              current += '\n\n' + b;
-          } else {
-              optimized.push(current);
-              current = b;
-          }
-      }
-      if (current) optimized.push(current);
-      mergedBubbles = optimized;
-  }
-  
-  if (mergedBubbles.length > hardMax) {
-    const allowed = mergedBubbles.slice(0, hardMax - 1)
-    const remainder = mergedBubbles.slice(hardMax - 1).join('\n\n')
-    allowed.push(remainder)
-    return allowed
-  }
-  
-  return mergedBubbles
+function userSafeError(error: unknown): string {
+  const message = visibleError(error)
+  if (message.startsWith('Lampirannya lebih dari 25 MB')) return message
+  if (message.startsWith('Voice note')) return message
+  if (message.includes('possible secret')) return 'aku nggak menyimpan teks itu karena kelihatannya mengandung data rahasia'
+  return 'ada kendala internal waktu memproses pesanmu, coba kirim lagi sebentar ya'
+}
+
+function quotedSummary(message: any, extractMessageContent: (message: any) => any): QuotedSummary | undefined {
+  const extracted = extractMessageContent(message)
+  const contextInfo = extracted?.extendedTextMessage?.contextInfo
+    || extracted?.imageMessage?.contextInfo
+    || extracted?.videoMessage?.contextInfo
+    || extracted?.documentMessage?.contextInfo
+    || extracted?.audioMessage?.contextInfo
+  const quoted = extractMessageContent(contextInfo?.quotedMessage)
+  return summarizeQuotedContent(quoted)
+}
+
+function messageText(message: any, extractMessageContent: (message: any) => any): string {
+  const extracted = extractMessageContent(message)
+  return String(
+    extracted?.conversation
+    || extracted?.extendedTextMessage?.text
+    || extracted?.imageMessage?.caption
+    || extracted?.videoMessage?.caption
+    || extracted?.documentMessage?.caption
+    || '',
+  ).trim()
+}
+
+function mediaInfo(
+  message: any,
+  extractMessageContent: (message: any) => any,
+): { media: any; name: string; mime: string; kind: string } | undefined {
+  const content = extractMessageContent(message)
+  const candidates: Array<[string, any]> = [
+    ['image', content?.imageMessage],
+    ['document', content?.documentMessage],
+    ['video', content?.videoMessage],
+    ['audio', content?.audioMessage],
+    ['sticker', content?.stickerMessage],
+  ]
+  const found = candidates.find(([, value]) => value)
+  if (!found) return undefined
+  const [kind, media] = found
+  const mime = String(media.mimetype || (kind === 'sticker' ? 'image/webp' : 'application/octet-stream'))
+  const extension = mime.split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg') || 'bin'
+  const suppliedName = typeof media.fileName === 'string' ? path.basename(media.fileName) : ''
+  return { media, mime, kind, name: suppliedName || `whatsapp-${kind}.${extension}` }
 }
 
 export function apply(ctx: Context) {
-  // Maintain AgentHandle references
-  const agentHandles = new Map<string, any>()
+  if (process.env.ELARA_DISABLE_WHATSAPP === '1') {
+    console.log('[ELARA] WhatsApp adapter disabled by environment')
+    return
+  }
 
-  // Dispose all agent handles on shutdown
-  ctx.on('dispose', async () => {
-    for (const handle of agentHandles.values()) {
-      await handle.dispose()
+  const rootDir = path.resolve(process.env.ELARA_ROOT || process.cwd())
+  const authDir = path.resolve(rootDir, '.baileys_auth_info')
+  const statePath = path.resolve(rootDir, '.runtime', 'whatsapp-sessions.json')
+  const preferencesPath = path.resolve(rootDir, '.runtime', 'whatsapp-preferences.json')
+  fs.mkdirSync(path.dirname(statePath), { recursive: true })
+
+  let sessionState: Record<string, string> = {}
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) sessionState = parsed
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') console.warn('[ELARA] WhatsApp session state was unreadable; starting clean')
+  }
+  const saveSessionState = () => {
+    const temporary = `${statePath}.tmp`
+    fs.writeFileSync(temporary, JSON.stringify(sessionState, null, 2), 'utf8')
+    fs.renameSync(temporary, statePath)
+  }
+
+  let emotionPreferences: Record<string, EmotionMode> = {}
+  try {
+    const parsed = JSON.parse(fs.readFileSync(preferencesPath, 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [key, value] of Object.entries(parsed)) {
+        const mode = parseEmotionMode(String(value))
+        if (mode !== undefined) emotionPreferences[key] = mode
+      }
     }
-    agentHandles.clear()
-  })
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') console.warn('[ELARA] WhatsApp preferences were unreadable; using auto emotion')
+  }
+  const saveEmotionPreferences = () => {
+    const temporary = `${preferencesPath}.tmp`
+    fs.writeFileSync(temporary, JSON.stringify(emotionPreferences, null, 2), { encoding: 'utf8', mode: 0o600 })
+    fs.renameSync(temporary, preferencesPath)
+  }
 
-  // Start connection
-  async function connectToWhatsApp() {
-    const authDir = path.resolve(process.cwd(), '.baileys_auth_info')
-    const { state, saveCreds } = await useMultiFileAuthState(authDir)
-    
-    // We use a silent pino logger so it doesn't spam stdout
-    const logger = pino({ level: 'silent' })
+  const agentHandles = new Map<string, any>()
+  const queues = new Map<string, Promise<void>>()
+  const seenMessageIds = new Set<string>()
+  const logger = pino({ level: process.env.ELARA_WA_LOG_LEVEL || 'silent' })
+  const typingSpeed = parseTypingSpeed(process.env.ELARA_TYPING_SPEED)
+  // These functions are replaced after the real Baileys module loads. Keep
+  // them per plugin instance so parallel profiles cannot alter one another.
+  let extractMessageContent = (message: any): any => message?.ephemeralMessage?.message
+    || message?.viewOnceMessage?.message
+    || message?.viewOnceMessageV2?.message
+    || message
+  let downloadMediaMessage: (...args: any[]) => Promise<unknown> = async () => {
+    throw new Error('WhatsApp media transport is unavailable')
+  }
+  let loggedOutDisconnectReason = 401
+  let socket: any
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  const pendingTestUpserts: any[] = []
+  const startupTasks = new Set<Promise<void>>()
 
-    const sock = makeWASocket({
-      auth: state,
-      printQRInTerminal: false,
-      logger
-    })
+  const trackStartup = (operation: () => Promise<void>, failureLabel: string) => {
+    if (disposed) return
+    const task = Promise.resolve()
+      .then(operation)
+      .catch(error => console.error(`[ELARA] WhatsApp ${failureLabel}:`, visibleError(error)))
+    startupTasks.add(task)
+    void task.then(
+      () => startupTasks.delete(task),
+      () => startupTasks.delete(task),
+    )
+  }
 
-    sock.ev.on('creds.update', saveCreds)
-
-    sock.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect, qr } = update
-      if (qr) {
-        qrcode.generate(qr, { small: true })
-      }
-      if (connection === 'close') {
-        const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut
-        console.log('[ELARA] WhatsApp connection closed. Reconnecting:', shouldReconnect)
-        if (shouldReconnect) {
-          connectToWhatsApp()
-        }
-      } else if (connection === 'open') {
-        console.log('[ELARA] WhatsApp connected!')
-      }
-    })
-
-    // Allow external tests to inject mock whatsapp messages via Cordis events or stdin
-    ctx.on('elara/test-whatsapp-upsert', (payload) => {
-      sock.ev.emit('messages.upsert', payload)
-    })
-    process.stdin.on('data', (data) => {
-      try {
-        const lines = data.toString().split('\n')
-        for (const line of lines) {
-          if (!line.trim()) continue
-          const payload = JSON.parse(line)
-          if (payload.type === 'mock_whatsapp') {
-            sock.ev.emit('messages.upsert', payload.upsert)
-          }
-        }
-      } catch (e) {}
-    })
-
-    const seenMessageIds = new Set<string>()
-    const activeRequests = new Map<string, number>()
-
-    const sendWA = async (jid: string, content: any, options?: any) => {
-      if (process.env.ELARA_MOCK_WA) {
-        console.log(`[MOCK_WA] sendMessage to ${jid}`);
-        return;
-      }
-      return sock.sendMessage(jid, content, options);
-    };
-
-    sock.ev.on('messages.upsert', async (m) => {
-      if (m.type !== 'notify') return
-      for (const msg of m.messages) {
-        if (!msg.message || msg.key.fromMe) continue
-
-        const remoteJid = msg.key.remoteJid
-        if (!remoteJid) continue
-
-        // GROUP CHAT RULE: IMMEDIATE RETURN
-        if (remoteJid.endsWith('@g.us')) continue
-
-        const textMessage = msg.message.conversation || msg.message.extendedTextMessage?.text
-        if (!textMessage) continue
-
-        const msgId = msg.key.id
-        if (!msgId) continue
-        if (seenMessageIds.has(msgId)) continue
-
-        seenMessageIds.add(msgId)
-        if (seenMessageIds.size > 1000) {
-          const first = seenMessageIds.values().next().value
-          if (first !== undefined) {
-            seenMessageIds.delete(first)
-          }
-        }
-
-        const sessionId = `whatsapp:${remoteJid}`
-        console.log(`[ELARA] WhatsApp message received from ${remoteJid}: ${textMessage}`)
-
-        // DOT COMMANDS
-        if (textMessage.trim().startsWith('.')) {
-          const cmd = textMessage.trim().split(' ')[0].toLowerCase()
-          if (['.help', '.status', '.pc', '.dashboard', '.new', '.refresh', '.mood', '.remember', '.memories', '.forget', '.searchmemory'].includes(cmd)) {
-            if (cmd === '.mood') {
-              await sendWA(remoteJid, { text: `Mood: neutral` }, { quoted: msg })
-            } else if (cmd === '.new' || cmd === '.refresh') {
-              const handle = agentHandles.get(sessionId)
-              if (handle) {
-                await handle.dispose()
-                agentHandles.delete(sessionId)
-              }
-              await sendWA(remoteJid, { text: `Session refreshed. New context started.` }, { quoted: msg })
-            } else if (cmd === '.remember') {
-              const text = textMessage.trim().substring('.remember'.length).trim();
-              if (text) {
-                ctx.memory.remember('explicit', text, 'user', 10);
-                await sendWA(remoteJid, { text: `oke, aku inget` }, { quoted: msg })
-              } else {
-                await sendWA(remoteJid, { text: `Mau inget apa?` }, { quoted: msg })
-              }
-            } else if (cmd === '.memories') {
-               const mems = ctx.memory.list();
-               if (mems.length === 0) {
-                 await sendWA(remoteJid, { text: `Belum ada ingatan.` }, { quoted: msg })
-               } else {
-                 let res = 'MEMORY\n\n';
-                 const per = mems.filter(m => m.type === 'personal');
-                 if (per.length) res += `Personal\n${per.map(m => `${m.id}. ${m.content}`).join('\n')}\n\n`;
-                 const proj = mems.filter(m => m.type === 'project');
-                 if (proj.length) res += `Project\n${proj.map(m => `${m.id}. ${m.content}`).join('\n')}\n\n`;
-                 const expl = mems.filter(m => m.type === 'explicit');
-                 if (expl.length) res += `Explicit\n${expl.map(m => `${m.id}. ${m.content}`).join('\n')}\n\n`;
-                 await sendWA(remoteJid, { text: res.trim() }, { quoted: msg })
-               }
-            } else if (cmd === '.forget') {
-               const idPart = textMessage.trim().split(' ')[1];
-               if (idPart && !isNaN(Number(idPart))) {
-                 const id = Number(idPart);
-                 const ok = ctx.memory.forget(id);
-                 await sendWA(remoteJid, { text: ok ? `Memory ${id} dihapus.` : `Memory itu nggak ketemu` }, { quoted: msg })
-               } else {
-                 await sendWA(remoteJid, { text: `ID memory nggak valid.` }, { quoted: msg })
-               }
-            } else if (cmd === '.searchmemory') {
-               const q = textMessage.trim().substring('.searchmemory'.length).trim();
-               const mems = ctx.memory.search(q);
-               if (mems.length === 0) {
-                 await sendWA(remoteJid, { text: `Nggak ketemu.` }, { quoted: msg })
-               } else {
-                 await sendWA(remoteJid, { text: mems.map(m => `${m.id}. ${m.content}`).join('\n') }, { quoted: msg })
-               }
-            } else {
-              await sendWA(remoteJid, { text: `Command ${cmd} acknowledged.` }, { quoted: msg })
-              console.log(`Command ${cmd} acknowledged.`)
-            }
-            continue // Skip LLM completely
-          }
-        }
-
-        const activeCount = (activeRequests.get(sessionId) || 0) + 1
-        activeRequests.set(sessionId, activeCount)
-        if (activeCount === 1) {
-          console.log(`[ELARA-PRESENCE] sendPresenceUpdate('composing', '${remoteJid}')`)
-          sock.sendPresenceUpdate('composing', remoteJid).catch(err => {
-            console.error(`[ELARA] Failed to send composing presence to ${remoteJid}:`, err)
-          })
-        }
-
-        try {
-          // Check if we already have the agent handle
-          let handle = agentHandles.get(sessionId)
-          let agent = handle ? handle.agent : ctx.agents.get(sessionId)
-          
-          if (!agent) {
-            const agentOpts = {
-              provider: 'router9',
-              model: 'grip/deepseek-v4.1-flash',
-            } as const
-            console.log(`[ELARA-DIAG] requested provider=${agentOpts.provider}`)
-            console.log(`[ELARA-DIAG] requested model=${agentOpts.model}`)
-
-            try {
-              handle = await ctx.agents.resume({
-                resumeSessionId: sessionId,
-                agentOptions: agentOpts,
-              })
-              agent = handle.agent
-              agentHandles.set(sessionId, handle)
-            } catch (err: any) {
-              console.log(`[ELARA-DIAG] resume failed for ${sessionId}:`, err.message);
-              if (err.name === 'SessionAlreadyOwnedError' || (err.message && err.message.includes('already owned'))) {
-                // It's likely being restored asynchronously by DSH core. Wait and grab it.
-                console.log(`[ELARA-DIAG] waiting for core to finish restoring ${sessionId}...`);
-                for (let i = 0; i < 20; i++) {
-                  await new Promise(r => setTimeout(r, 100));
-                  agent = ctx.agents.get(sessionId);
-                  if (agent) break;
-                }
-                if (!agent) {
-                  console.log(`[ELARA-DIAG] Failed to get agent after wait.`);
-                } else {
-                  console.log(`[ELARA-DIAG] Successfully acquired restored agent ${sessionId}`);
-                  // Note: handle might not be available here, but we have agent.
-                  // For DSH we can use agent directly.
-                }
-              }
-
-              if (!agent) {
-                try {
-                  handle = await ctx.agents.create({
-                    sessionId,
-                    meta: { cwd: process.cwd() },
-                    agentOptions: agentOpts,
-                  })
-                  agent = handle.agent
-                  agentHandles.set(sessionId, handle)
-                } catch (createErr) {
-                  console.error(`[ELARA] Failed to create agent as fallback:`, createErr);
-                }
-              }
-            }
-
-            console.log(`[ELARA-DIAG] actual provider=${agent.options?.provider}`)
-            console.log(`[ELARA-DIAG] actual model=${agent.options?.model}`)
-          } else if (!handle) {
-            // It exists in registry but we don't have the handle (e.g. created outside this plugin instance).
-            // We can just use the agent directly without disposing it ourselves.
-          }
-
-          if (!agent) continue
-
-          // DIAGNOSTICS BEFORE
-          console.log(`[ELARA-DIAG] BEFORE FOLLOWUP`);
-          console.log(`[ELARA-DIAG] agent.id: ${agent.id}`);
-          console.log(`[ELARA-DIAG] agent.session.id: ${agent.session.id}`);
-          console.log(`[ELARA-DIAG] agent.status: ${agent.status}`);
-          console.log(`[ELARA-DIAG] agent model config: provider=${agent.options?.provider}, model=${agent.options?.model}`);
-
-          // 1. Before sending the user message:
-          const before = agent.session.deriveMessages();
-
-          await ctx.agents.withInitiator(agent, async () => {
-            // Listen for agent errors that might be swallowed
-            ctx.on('agent/error', (payload: any) => {
-              console.log(`[ELARA-DIAG] agent/error: turn=${payload.turn} step=${payload.step} error=${payload.error?.stack || String(payload.error)}`);
-            });
-
-            // Listen for tool results
-            ctx.on('tools/result', (exec, result) => {
-              console.log(`[ELARA-DIAG] tools/result for '${exec.name}': isError=${result.isError}, value=${typeof result.value === 'object' ? JSON.stringify(result.value) : String(result.value)}`);
-              if (result.isError) {
-                 console.log(`[ELARA-DIAG] tools/result error: ${result.error?.message}`);
-              } else {
-                 console.log(`[ELARA-DIAG] tools/result content: ${JSON.stringify(result.content)}`);
-              }
-            });
-
-            // 2. Send:
-            const relevantMems = ctx.memory.search(textMessage, 5);
-            let injectedText = textMessage;
-            if (relevantMems.length > 0) {
-              const memStr = relevantMems.map(m => `- ${m.content}`).join('\n');
-              injectedText = `[SYSTEM: Relevant Memories]\n${memStr}\n\n[USER]\n${textMessage}`;
-              for (const m of relevantMems) {
-                ctx.memory.updateLastUsed(m.id);
-              }
-            }
-
-            const userMsg = createUserMessage({
-              source: { kind: 'user' },
-              content: [{ type: 'text', text: injectedText }],
-            });
-            agent.followup(userMsg);
-            console.log(`[ELARA-DIAG] AFTER FOLLOWUP`);
-            console.log(`[ELARA-DIAG] agent.status after followup: ${agent.status}`);
-            console.log(`[ELARA-DIAG] agent.inbox.nextTurn.length: ${agent.inbox.nextTurn.length}`);
-            console.log(`[ELARA-DIAG] agent.inbox.nextStep.length: ${agent.inbox.nextStep.length}`);
-
-            // yield to microtask queue so wakeDriver's kick() can begin
-            await new Promise(r => setTimeout(r, 0));
-            console.log(`[ELARA-DIAG] agent.status after yield: ${agent.status}`);
-
-            // 3. Await:
-            await agent.whenIdle();
-            console.log(`[ELARA-DIAG] AFTER WHENIDLE`);
-          });
-
-          // 4. Persist:
-          await ctx.sessions.flush(agent.session);
-          console.log(`[ELARA-DIAG] AFTER FLUSH`);
-
-          // 5. Read:
-          const after = agent.session.deriveMessages();
-
-          // 6. Determine which assistant messages were added by this turn.
-          const beforeIds = new Set(before.map((m: any) => m.id));
-          const addedMessages = after.filter((m: any) => !beforeIds.has(m.id));
-
-          // 7. Select the newly generated assistant/model message(s).
-          const assistantMessages = addedMessages.filter((m: any) => m.role === 'assistant');
-
-          // 8. Extract their text blocks only.
-          let responseText = '';
-          if (assistantMessages.length > 0) {
-            const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
-            if (lastAssistantMsg.content && Array.isArray(lastAssistantMsg.content)) {
-              responseText = lastAssistantMsg.content
-                .filter((c: any) => c.type === 'text')
-                .map((c: any) => c.text)
-                .join('');
-            }
-          }
-
-          // 9. If a final assistant message exists, send that text back to WhatsApp.
-          if (responseText) {
-            const bubbles = splitIntoBubbles(responseText)
-            
-            for (let i = 0; i < bubbles.length; i++) {
-              const bubbleText = bubbles[i]
-              console.log(`[ELARA] Replying bubble ${i+1}/${bubbles.length} to ${remoteJid}: ${bubbleText}`)
-              
-              if (i === 0) {
-                await sendWA(remoteJid, { text: bubbleText }, { quoted: msg })
-              } else {
-                await sendWA(remoteJid, { text: bubbleText })
-              }
-              
-              ctx.emit('elara/test-whatsapp-sent' as any, { remoteJid, text: bubbleText })
-              console.log(JSON.stringify({ type: 'mock_whatsapp_sent', remoteJid, text: bubbleText }))
-              
-              if (i < bubbles.length - 1) {
-                await new Promise(r => setTimeout(r, 600))
-              }
-            }
-          } else {
-            // 10. If no assistant message exists, log safe primitive info
-            console.log(`[ELARA] No text response generated for ${sessionId}. Added messages: ${addedMessages.length}, Roles: ${addedMessages.map((m: any) => m.role).join(',')}`);
-          }
-
-        } catch (err) {
-          console.error(`[ELARA] WhatsApp adapter error for ${sessionId}:`, err)
-        } finally {
-          const newCount = Math.max(0, (activeRequests.get(sessionId) || 1) - 1)
-          activeRequests.set(sessionId, newCount)
-          if (newCount === 0) {
-            console.log(`[ELARA-PRESENCE] sendPresenceUpdate('paused', '${remoteJid}')`)
-            sock.sendPresenceUpdate('paused', remoteJid).catch(err => {
-              console.error(`[ELARA] Failed to clear composing presence for ${remoteJid}:`, err)
-            })
-          }
-        }
-      }
-    })
-    
-    // Dispose socket on plugin shutdown
-    ctx.on('dispose', () => {
-      sock.end(undefined)
+  const enqueue = (key: string, operation: () => Promise<void>) => {
+    const previous = queues.get(key) ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(operation)
+    queues.set(key, next)
+    void next.finally(() => {
+      if (queues.get(key) === next) queues.delete(key)
     })
   }
 
-  connectToWhatsApp()
+  const sendWA = async (jid: string, content: any, options?: any) => {
+    if (disposed) return
+    if (process.env.ELARA_MOCK_WA === '1') {
+      ctx.emit('elara/test-whatsapp-sent' as any, { remoteJid: jid, ...content })
+      return
+    }
+    if (!socket) throw new Error('WhatsApp is not connected')
+    return socket.sendMessage(jid, content, options)
+  }
+
+  const sessionFor = (jid: string) => sessionState[userKey(jid)] || `whatsapp:${jid}`
+  const memoryOwnerFor = (principal: Principal) => principal.id
+  const emotionModeFor = (jid: string): EmotionMode => emotionPreferences[userKey(jid)] ?? 'auto'
+
+  // Approval responses must bypass the turn queue: that turn is waiting for
+  // the response. Only the exact trusted sender can answer their own question.
+  const stopApprovalListener = ctx.access?.onApproval(view => {
+    if (view.originChannel !== 'whatsapp' || disposed) return
+    const principal = ctx.access.state.config?.principals.find(item => item.id === view.principalId && item.enabled)
+    const jid = principal?.channelAliases.whatsapp?.find(alias => {
+      if (sessionFor(alias) === view.sessionId) return true
+      const root = ctx.agents.get(SessionId(sessionFor(alias)))
+      return root && ctx.agents.isOwnedBy(SessionId(view.sessionId), root)
+    })
+    if (!jid) throw new Error('APPROVAL_CHANNEL_UNAVAILABLE')
+    return sendWA(jid, { text: `Persetujuan sekali pakai: ${view.toolName}\nPerangkat: ${view.targetDeviceId}\n${view.details}\n\nBalas .approve ${view.id} atau .reject ${view.id}\nBerlaku 2 menit.` }).then(() => undefined)
+  })
+  ctx.effect(() => () => { stopApprovalListener?.() })
+
+  async function acquireAgent(sessionId: string) {
+    const typedSessionId = SessionId(sessionId)
+    const existing = ctx.agents.get(typedSessionId)
+    if (existing) return existing
+    const selection = ctx.agentDefaultModel.currentSelection()
+    const setup = async (agentCtx: Context) => { await ctx.agentPresets.mount(agentCtx, 'elara') }
+    try {
+      const handle = await ctx.agents.resume({
+        resumeSessionId: typedSessionId,
+        agentOptions: { provider: selection.provider, model: selection.model },
+        setup,
+      })
+      agentHandles.set(sessionId, handle)
+      return handle.agent
+    } catch (error: any) {
+      if (error?.name === 'SessionAlreadyOwnedError' || visibleError(error).includes('already owned')) {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          const restored = ctx.agents.get(typedSessionId)
+          if (restored) return restored
+        }
+        throw error
+      }
+      const code = error?.code || error?.details?.code
+      const missing = code === 'session/not-found' || /not found|does not exist|no such/i.test(visibleError(error))
+      if (!missing) throw error
+    }
+    const handle = await ctx.agents.create({
+      sessionId: typedSessionId,
+      meta: { cwd: rootDir, agentPreset: 'elara' },
+      agentOptions: { provider: selection.provider, model: selection.model },
+      setup,
+    })
+    agentHandles.set(sessionId, handle)
+    return handle.agent
+  }
+
+  async function buildContent(msg: any, text: string): Promise<ContentBlock[]> {
+    const content: ContentBlock[] = []
+    const quote = quotedSummary(msg.message, extractMessageContent)
+    let combinedText = combineQuotedContext(quote, text)
+
+    const info = mediaInfo(msg.message, extractMessageContent)
+    if (info) {
+      const advertisedSize = Number(info.media.fileLength || 0)
+      if (Number.isFinite(advertisedSize) && advertisedSize > MAX_MEDIA_BYTES) {
+        throw new Error('Lampirannya lebih dari 25 MB, jadi belum bisa aku proses lewat WhatsApp')
+      }
+      const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
+        logger,
+        reuploadRequest: socket.updateMediaMessage,
+      }) as Buffer
+      if (buffer.byteLength > MAX_MEDIA_BYTES) {
+        throw new Error('Lampirannya lebih dari 25 MB, jadi belum bisa aku proses lewat WhatsApp')
+      }
+      const data = new Uint8Array(buffer)
+      if (info.kind === 'audio' && info.media.ptt === true) {
+        const config = transcriptionConfig()
+        if (!config) {
+          throw new Error('Voice note belum bisa aku dengar karena transkripsi belum dikonfigurasi')
+        }
+        try {
+          const transcript = await transcribeAudio({
+            data, mimeType: info.mime, fileName: info.name,
+          }, config)
+          combinedText = [combinedText, `[Transkripsi voice note]\n${transcript}`].filter(Boolean).join('\n\n')
+        } catch (error) {
+          const code = error instanceof Error ? error.name : 'unknown'
+          console.error(`[ELARA] Voice note transcription failed (${code})`)
+          throw new Error('Voice note belum berhasil aku transkripsikan, coba kirim ulang atau tulis pesannya dulu')
+        }
+      }
+      if (combinedText) content.push({ type: 'text', text: combinedText })
+      if (info.kind === 'image' && ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(info.mime)) {
+        const attachment = await ctx.attachments.saveImage({ data, mediaType: info.mime as any, name: info.name })
+        content.push({ type: 'image', attachment })
+      } else {
+        const attachment = await ctx.attachments.saveFile({ data, name: info.name })
+        content.push({ type: 'file', attachment })
+      }
+      if (!combinedText) content.unshift({ type: 'text', text: `Tolong periksa lampiran ${info.name}` })
+    } else if (combinedText) {
+      content.push({ type: 'text', text: combinedText })
+    }
+    return content
+  }
+
+  async function handleCommand(jid: string, principal: Principal, msg: any, text: string): Promise<boolean> {
+    if (!text.startsWith('.')) return false
+    const [rawCommand, ...rest] = text.split(/\s+/)
+    const command = rawCommand!.toLowerCase()
+    const argument = rest.join(' ').trim()
+    const owner = memoryOwnerFor(principal)
+    const reply = (value: string) => sendWA(jid, { text: value }, { quoted: msg })
+
+    if (command === '.help') {
+      await reply([
+        '.new  mulai percakapan baru',
+        '.status  lihat status sesi dan model',
+        '.emotion auto atau 0 sampai 5  atur tingkat emosi',
+        '.pc  cek kondisi singkat laptop',
+        '.dashboard  alamat dashboard lokal',
+        '.remember <teks>  simpan ingatan',
+        '.memories  lihat ingatanmu',
+        '.searchmemory <kata>  cari ingatan',
+        '.forget <id>  hapus ingatanmu',
+      ].join('\n'))
+      return true
+    }
+    if (command === '.new' || command === '.refresh') {
+      const oldSession = sessionFor(jid)
+      const handle = agentHandles.get(oldSession)
+      if (handle) await handle.dispose()
+      agentHandles.delete(oldSession)
+      const newSessionId = `whatsapp:${userKey(jid)}:${crypto.randomUUID()}`
+      ctx.access.bindRootSession(newSessionId, principal.id, 'whatsapp')
+      sessionState[userKey(jid)] = newSessionId
+      saveSessionState()
+      await reply('oke, kita mulai dari konteks baru')
+      return true
+    }
+    if (command === '.status') {
+      const sessionId = sessionFor(jid)
+      const agent = ctx.agents.get(SessionId(sessionId))
+      const selection = agent?.options ?? ctx.agentDefaultModel.currentSelection()
+      const emotionMode = emotionModeFor(jid)
+      const emotionLabel = emotionMode === 'auto' ? 'auto' : `${emotionMode}  ${EMOTION_LEVEL_LABELS[emotionMode]}`
+      await reply(`Status: ${agent?.status || 'belum aktif'}\nModel: ${selection.provider}/${selection.model}\nEmosi: ${emotionLabel}`)
+      return true
+    }
+    if (command === '.pc') {
+      const sessionId = sessionFor(jid)
+      await reply(String(await executeReviewedWindowsTool(ctx, {
+        principalId: principal.id,
+        sessionId,
+        originChannel: 'whatsapp',
+        targetDeviceId: ctx.access.defaultTarget('whatsapp'),
+        source: 'whatsapp:pc',
+        capabilityId: 'system.status',
+      }, 'elara_windows_status', {})))
+      return true
+    }
+    if (command === '.dashboard') {
+      await reply('Dashboard lokal: http://127.0.0.1:31337')
+      return true
+    }
+    if (command === '.emotion' || command === '.mood') {
+      const current = emotionModeFor(jid)
+      if (!argument) {
+        const currentLabel = current === 'auto' ? 'auto' : `${current}  ${EMOTION_LEVEL_LABELS[current]}`
+        await reply(`Tingkat emosi saat ini ${currentLabel}\nGunakan .emotion auto atau angka 0 sampai 5`)
+        return true
+      }
+      const requested = parseEmotionMode(argument)
+      if (requested === undefined) {
+        await reply('Pilih auto atau angka 0 sampai 5')
+        return true
+      }
+      emotionPreferences[userKey(jid)] = requested
+      saveEmotionPreferences()
+      const selected = requested === 'auto' ? 'auto' : `${requested}  ${EMOTION_LEVEL_LABELS[requested]}`
+      await reply(`Tingkat emosi diatur ke ${selected}`)
+      return true
+    }
+    if (command === '.remember') {
+      if (!argument) { await reply('mau aku ingat apa?'); return true }
+      ctx.memory.remember(owner, 'explicit', argument, 'user', 10)
+      await reply('oke, aku inget')
+      return true
+    }
+    if (command === '.memories') {
+      const memories = ctx.memory.list(owner)
+      await reply(memories.length
+        ? memories.map(memory => `${memory.id}. [${memory.type}] ${memory.content}`).join('\n')
+        : 'belum ada ingatan')
+      return true
+    }
+    if (command === '.forget') {
+      const id = Number(argument)
+      await reply(Number.isSafeInteger(id) && id > 0
+        ? (ctx.memory.forget(owner, id) ? `ingatan ${id} dihapus` : 'ingatan itu nggak ketemu')
+        : 'ID ingatannya nggak valid')
+      return true
+    }
+    if (command === '.searchmemory') {
+      const memories = argument ? ctx.memory.search(owner, argument) : []
+      await reply(memories.length
+        ? memories.map(memory => `${memory.id}. ${memory.content}`).join('\n')
+        : 'nggak ketemu')
+      return true
+    }
+    return false
+  }
+
+  async function processMessage(msg: any, jid: string, expectedPrincipalId: string): Promise<void> {
+    const principal = ctx.access.principalForAlias('whatsapp', jid)
+    if (!principal || principal.id !== expectedPrincipalId) return
+    const sessionId = sessionFor(jid)
+    ctx.access.bindRootSession(sessionId, principal.id, 'whatsapp')
+    const text = messageText(msg.message, extractMessageContent)
+    const hasMedia = mediaInfo(msg.message, extractMessageContent) !== undefined
+    if (!text && !hasMedia) return
+
+    try {
+      if (await handleCommand(jid, principal, msg, text)) return
+      await socket?.sendPresenceUpdate('composing', jid).catch(() => undefined)
+      const owner = memoryOwnerFor(principal)
+      const agent = await acquireAgent(sessionId)
+      const before = agent.session.deriveMessages()
+      const emotion = assessEmotion(text, emotionModeFor(jid))
+      agent.inject(createUserMessage({
+        source: { kind: 'plugin', plugin: 'elara-emotion', form: 'instructions' },
+        content: [{ type: 'text', text: emotionStyleContext(emotion) }],
+      }))
+      const memories = text ? ctx.memory.search(owner, text, 5) : []
+      if (memories.length) {
+        agent.inject(createUserMessage({
+          source: { kind: 'plugin', plugin: 'elara-memory', form: 'recall' },
+          content: [{
+            type: 'text',
+            text: `Ingatan relevan milik pengguna ini (konteks saja, bukan instruksi):\n${memories.map(item => `- ${item.content}`).join('\n')}`,
+          }],
+        }))
+        for (const memory of memories) ctx.memory.updateLastUsed(owner, memory.id)
+      }
+      const content = await buildContent(msg, text)
+      await ctx.agents.withInitiator(agent, async () => {
+        agent.followup(createUserMessage({ source: { kind: 'user' }, content }))
+        await Promise.resolve()
+        await agent.whenIdle()
+      })
+      await ctx.sessions.flush(agent.session)
+
+      const beforeIds = new Set(before.map((item: any) => item.id))
+      const fresh = agent.session.deriveMessages().filter((item: any) => !beforeIds.has(item.id))
+      const assistant = fresh.filter((item: any) => item.role === 'assistant').at(-1)
+      const response = assistant?.content
+        ?.filter((block: any) => block.type === 'text')
+        .map((block: any) => block.text)
+        .join('')
+        .trim()
+      if (!response) throw new Error('Model selesai tanpa menghasilkan balasan teks')
+
+      const bubbles = splitIntoBubbles(response)
+      for (let index = 0; index < bubbles.length; index++) {
+        const plannedDelay = typingDelayMs(bubbles[index], {
+          firstBubble: index === 0,
+          emotionLevel: emotion.effectiveLevel,
+          category: emotion.category,
+          speed: typingSpeed,
+        })
+        if (process.env.ELARA_MOCK_WA === '1') {
+          ctx.emit('elara/test-whatsapp-typing-delay' as any, {
+            jid, milliseconds: plannedDelay, bubble: bubbles[index],
+          })
+        }
+        const delay = process.env.ELARA_MOCK_WA === '1' ? 0 : plannedDelay
+        if (delay > 0) {
+          await socket?.sendPresenceUpdate('composing', jid).catch(() => undefined)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
+        await sendWA(jid, { text: bubbles[index] }, index === 0 ? { quoted: msg } : undefined)
+      }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code) : error instanceof Error ? error.name : 'unknown'
+      console.error(`[ELARA] WhatsApp request failed for ${userKey(jid)} (${code})`)
+      await sendWA(jid, { text: userSafeError(error) }, { quoted: msg })
+        .catch(() => undefined)
+    } finally {
+      await socket?.sendPresenceUpdate('paused', jid).catch(() => undefined)
+    }
+  }
+
+  async function connectToWhatsApp(): Promise<void> {
+    if (disposed) return
+    let nextSocket: any
+    if (process.env.ELARA_MOCK_WA === '1') {
+      downloadMediaMessage = async (msg: any) => {
+        const bytes = msg?.message?.audioMessage?.__fixtureBytes
+        if (!Array.isArray(bytes) || !bytes.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+          throw new Error('Synthetic media bytes are unavailable')
+        }
+        return Buffer.from(bytes)
+      }
+      nextSocket = {
+        ev: new EventEmitter(),
+        sendPresenceUpdate: async (state: string, jid: string) => {
+          ctx.emit('elara/test-whatsapp-presence' as any, { state, jid })
+        },
+        updateMediaMessage: async () => undefined,
+        end: () => undefined,
+      }
+    } else {
+      const baileys = await import('@whiskeysockets/baileys')
+      if (disposed) return
+      extractMessageContent = baileys.extractMessageContent
+      downloadMediaMessage = baileys.downloadMediaMessage as typeof downloadMediaMessage
+      loggedOutDisconnectReason = baileys.DisconnectReason.loggedOut
+      const { state, saveCreds } = await baileys.useMultiFileAuthState(authDir)
+      if (disposed) return
+      nextSocket = baileys.makeWASocket({ auth: state, printQRInTerminal: false, logger })
+      if (disposed) {
+        nextSocket.end(undefined)
+        return
+      }
+      nextSocket.ev.on('creds.update', saveCreds)
+    }
+    if (disposed) {
+      nextSocket.end(undefined)
+      return
+    }
+    socket = nextSocket
+    socket.ev.on('connection.update', (update: any) => {
+      const { connection, lastDisconnect, qr } = update
+      if (qr) qrcode.generate(qr, { small: true })
+      if (connection === 'open') console.log('[ELARA] WhatsApp connected')
+      if (connection !== 'close' || disposed) return
+      const status = (lastDisconnect?.error as any)?.output?.statusCode
+      const shouldReconnect = status !== loggedOutDisconnectReason
+      console.log(`[ELARA] WhatsApp connection closed; reconnect=${shouldReconnect}`)
+      if (shouldReconnect && !reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined
+          trackStartup(connectToWhatsApp, 'reconnect failed')
+        }, 1500)
+      }
+    })
+    socket.ev.on('messages.upsert', (upsert: any) => {
+      if (upsert.type !== 'notify') return
+      for (const msg of upsert.messages) {
+        const jid = msg.key?.remoteJid
+        const messageId = msg.key?.id
+        if (!msg.message || msg.key?.fromMe || !jid || !messageId || jid.endsWith('@g.us')) continue
+        const principal = ctx.access.principalForAlias('whatsapp', jid)
+        if (!principal) continue
+        if (seenMessageIds.has(messageId)) continue
+        seenMessageIds.add(messageId)
+        if (seenMessageIds.size > 2000) seenMessageIds.delete(seenMessageIds.values().next().value!)
+        const approvalCommand = messageText(msg.message, extractMessageContent).match(/^\.(approve|reject)\s+(\S+)$/i)
+        if (approvalCommand) {
+          const accepted = ctx.access.answerApproval(approvalCommand[2], principal.id, 'whatsapp', approvalCommand[1].toLowerCase() === 'approve')
+          void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
+          continue
+        }
+        enqueue(principal.id, () => processMessage(msg, jid, principal.id))
+      }
+    })
+    if (process.env.ELARA_MOCK_WA === '1') {
+      for (const payload of pendingTestUpserts.splice(0)) socket.ev.emit('messages.upsert', payload)
+      ctx.emit('elara/test-whatsapp-ready' as any, { socket })
+    }
+  }
+
+  ctx.on('elara/test-whatsapp-upsert' as any, (payload: any) => {
+    if (socket) socket.ev.emit('messages.upsert', payload)
+    else if (process.env.ELARA_MOCK_WA === '1') pendingTestUpserts.push(payload)
+  })
+  ctx.effect(() => async () => {
+    disposed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    await Promise.allSettled([...startupTasks])
+    await Promise.allSettled(queues.values())
+    for (const handle of agentHandles.values()) await handle.dispose().catch(() => undefined)
+    agentHandles.clear()
+    socket?.end(undefined)
+    socket = undefined
+  })
+
+  trackStartup(async () => {
+    await ctx.agentPresets.resolve('elara')
+    if (disposed) return
+    await connectToWhatsApp()
+  }, 'did not start')
 }

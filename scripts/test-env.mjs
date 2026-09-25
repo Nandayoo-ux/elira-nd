@@ -1,1 +1,4 @@
-console.log(Object.keys(process.env).filter(k => k.includes('KEY') || k.includes('ROUTER') || k.includes('API') || k.includes('DEEPSEEK')).map(k => `${k}=${process.env[k]}`).join('\n'));
+for (const name of Object.keys(process.env)
+  .filter(name => /KEY|ROUTER|API|DEEPSEEK/i.test(name)).sort()) {
+  console.log(`${name}=<present>`)
+}

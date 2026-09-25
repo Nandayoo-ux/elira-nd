@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { AccessConfig, Capability, ExecutionContext, PolicyDecision } from './contracts.ts'
+import { POLICY_VERSION, type AccessConfig, type Capability, type ExecutionContext, type PolicyDecision } from './contracts.ts'
 
 const host = (id: string, toolName: string, risk: Capability['risk']): Capability => ({
   id, toolName, risk, requiresDevice: true, executionLocation: 'host',
@@ -105,10 +105,9 @@ function containsLinkOrJunction(absolutePath: string): boolean {
 /** Resolve the same native host target used by DSH filesystem tools before classifying it. */
 export function assessFilesystemTool(name: string, args: unknown, sessionCwd: string | undefined): FilesystemAssessment {
   if (SEARCH_TOOLS.has(name)) {
-    // Search tools are now approvable via WhatsApp P2B buttons rather than
-    // blocked outright. The tool's native risk ('read_only') is elevated to
-    // 'sensitive' so it routes through approval instead of auto-allow.
-    return { risk: 'sensitive' as const }
+    // Ripgrep can expose protected descendants and link targets before the
+    // policy can filter results; an approval does not enforce search scope.
+    return { denialReasonCode: 'SEARCH_SCOPE_UNENFORCEABLE' }
   }
   if (!FILE_READ_TOOLS.has(name)) return {}
   if (!sessionCwd || !path.isAbsolute(sessionCwd)) return { denialReasonCode: 'FILESYSTEM_CWD_UNTRUSTED' }
@@ -156,7 +155,7 @@ export function evaluatePolicy(
   capability: Capability,
   bindingPrincipalId: string | undefined,
 ): PolicyDecision {
-  const policyVersion = config?.policyVersion || 'unavailable'
+  const policyVersion = config ? POLICY_VERSION : 'unavailable'
   const decision = (outcome: PolicyDecision['outcome'], reasonCode: string): PolicyDecision => ({
     outcome, reasonCode, policyVersion, capability,
   })
