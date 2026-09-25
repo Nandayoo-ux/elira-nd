@@ -25,6 +25,9 @@ import { splitIntoBubbles } from './format.ts'
 import { combineQuotedContext, summarizeQuotedContent, type QuotedSummary } from './message-context.ts'
 import { transcribeAudio, transcriptionConfig } from './transcription.ts'
 import { parseTypingSpeed, typingDelayMs } from './typing.ts'
+import { approvalButtonAnswer, approvalButtonContent, approvalButtonId, approvalPreviewText,
+  approvalQuotedAnswer, approvalReactionAnswer } from './approval-buttons.ts'
+import { isScreenshotRequest, prepareScreenshotTarget, readScreenshot } from './outbound-screenshot.ts'
 
 export { splitIntoBubbles } from './format.ts'
 
@@ -44,6 +47,7 @@ function visibleError(error: unknown): string {
 
 function userSafeError(error: unknown): string {
   const message = visibleError(error)
+  if (message.startsWith('SCREENSHOT_')) return 'Screenshot-nya belum berhasil kukirim ke WhatsApp. Coba minta lagi ya.'
   if (message.startsWith('Lampirannya lebih dari 25 MB')) return message
   if (message.startsWith('Voice note')) return message
   if (message.includes('possible secret')) return 'aku nggak menyimpan teks itu karena kelihatannya mengandung data rahasia'
@@ -140,6 +144,21 @@ export function apply(ctx: Context) {
   const agentHandles = new Map<string, any>()
   const queues = new Map<string, Promise<void>>()
   const seenMessageIds = new Set<string>()
+  const approvalMessages = new Map<string, { approvalId: string; jid: string; principalId: string; timer: ReturnType<typeof setTimeout> }>()
+  const clearApprovalMessage = (approvalId: string) => {
+    for (const [messageId, entry] of approvalMessages) {
+      if (entry.approvalId !== approvalId) continue
+      clearTimeout(entry.timer)
+      approvalMessages.delete(messageId)
+    }
+  }
+  const ingressDiagnostics = new Map<string, number>()
+  const noteIngress = (reason: string) => {
+    const now = Date.now()
+    if (now - (ingressDiagnostics.get(reason) ?? 0) < 15_000) return
+    ingressDiagnostics.set(reason, now)
+    console.log(`[ELARA] WhatsApp ingress: ${reason}`)
+  }
   const logger = pino({ level: process.env.ELARA_WA_LOG_LEVEL || 'silent' })
   const typingSpeed = parseTypingSpeed(process.env.ELARA_TYPING_SPEED)
   // These functions are replaced after the real Baileys module loads. Keep
@@ -182,11 +201,28 @@ export function apply(ctx: Context) {
   const sendWA = async (jid: string, content: any, options?: any) => {
     if (disposed) return
     if (process.env.ELARA_MOCK_WA === '1') {
-      ctx.emit('elara/test-whatsapp-sent' as any, { remoteJid: jid, ...content })
-      return
+      const messageId = crypto.randomUUID()
+      ctx.emit('elara/test-whatsapp-sent' as any, { remoteJid: jid, messageId, ...content })
+      return { key: { id: messageId } }
     }
     if (!socket) throw new Error('WhatsApp is not connected')
     return socket.sendMessage(jid, content, options)
+  }
+
+  const sendApprovalButtons = async (jid: string, view: import('../../packages/policy/approvals.ts').PendingApproval) => {
+    if (process.env.ELARA_MOCK_WA === '1') {
+      ctx.emit('elara/test-whatsapp-sent' as any, { remoteJid: jid, approvalButtons: [
+        { id: approvalButtonId(view.id, true), text: 'Izinkan sekali' },
+        { id: approvalButtonId(view.id, false), text: 'Tolak' },
+      ] })
+      return
+    }
+    if (!socket?.user?.id) throw new Error('WhatsApp is not connected')
+    const baileys = await import('@whiskeysockets/baileys')
+    const content = baileys.proto.Message.fromObject(approvalButtonContent(view))
+    const message = baileys.generateWAMessageFromContent(jid, content, { userJid: socket.user.id })
+    if (!message.message || !message.key.id) throw new Error('WhatsApp approval card could not be built')
+    await socket.relayMessage(jid, message.message, { messageId: message.key.id })
   }
 
   const sessionFor = (jid: string) => sessionState[userKey(jid)] || `whatsapp:${jid}`
@@ -195,7 +231,7 @@ export function apply(ctx: Context) {
 
   // Approval responses must bypass the turn queue: that turn is waiting for
   // the response. Only the exact trusted sender can answer their own question.
-  const stopApprovalListener = ctx.access?.onApproval(view => {
+  const stopApprovalListener = ctx.access?.onApproval(async view => {
     if (view.originChannel !== 'whatsapp' || disposed) return
     const principal = ctx.access.state.config?.principals.find(item => item.id === view.principalId && item.enabled)
     const jid = principal?.channelAliases.whatsapp?.find(alias => {
@@ -204,7 +240,15 @@ export function apply(ctx: Context) {
       return root && ctx.agents.isOwnedBy(SessionId(view.sessionId), root)
     })
     if (!jid) throw new Error('APPROVAL_CHANNEL_UNAVAILABLE')
-    return sendWA(jid, { text: `Persetujuan sekali pakai: ${view.toolName}\nPerangkat: ${view.targetDeviceId}\n${view.details}\n\nBalas .approve ${view.id} atau .reject ${view.id}\nBerlaku 2 menit.` }).then(() => undefined)
+    const prompt = await sendWA(jid, { text: approvalPreviewText(view) })
+    const messageId = prompt?.key?.id
+    if (typeof messageId === 'string' && messageId) {
+      const timer = setTimeout(() => approvalMessages.delete(messageId), Math.max(0, view.expiresAt - Date.now()) + 1_000)
+      timer.unref?.()
+      approvalMessages.set(messageId, { approvalId: view.id, jid, principalId: view.principalId, timer })
+    }
+    try { await sendApprovalButtons(jid, view) }
+    catch { console.warn('[ELARA] WhatsApp approval buttons unavailable; text reply remains available') }
   })
   ctx.effect(() => () => { stopApprovalListener?.() })
 
@@ -419,6 +463,8 @@ export function apply(ctx: Context) {
       ctx.control.assertCurrent(admission)
       if (await handleCommand(jid, principal, msg, text, admission)) return
       ctx.control.assertCurrent(admission)
+      const screenshotPath = isScreenshotRequest(text)
+        ? prepareScreenshotTarget(rootDir, userKey(jid), admission.operationId) : undefined
       await socket?.sendPresenceUpdate('composing', jid).catch(() => undefined)
       const owner = memoryOwnerFor(principal)
       const agent = await acquireAgent(sessionId)
@@ -428,6 +474,14 @@ export function apply(ctx: Context) {
       agent.inject(createUserMessage({
         source: { kind: 'plugin', plugin: 'elara-emotion', form: 'instructions' },
         content: [{ type: 'text', text: emotionStyleContext(emotion) }],
+      }))
+      agent.inject(createUserMessage({
+        source: { kind: 'plugin', plugin: 'elara-whatsapp-format', form: 'instructions' },
+        content: [{ type: 'text', text: 'Balasan ini akan dikirim sebagai teks WhatsApp. Jika perlu penekanan, gunakan *tebal* (satu bintang) atau _miring_. Gunakan tiga backtick di kedua sisi blok perintah atau kode. Jangan pakai **tebal**, judul dengan #, tabel Markdown, atau HTML. Obrolan santai tetap teks biasa. Jangan mengubah isi literal perintah, path, URL, atau kutipan demi format.' }],
+      }))
+      if (screenshotPath) agent.inject(createUserMessage({
+        source: { kind: 'plugin', plugin: 'elara-whatsapp-screenshot', form: 'instructions' },
+        content: [{ type: 'text', text: `Pengguna meminta screenshot layar untuk dikirim lewat WhatsApp. Jika berhasil mengambilnya, simpan berkas PNG tepat di path ini: ${screenshotPath}. Adaptor WhatsApp hanya akan mengirim berkas itu setelah pekerjaan selesai. Jangan mengklaim gambar telah terkirim atau menyebut fitur pengiriman dibatasi; adaptor yang menentukan hasil pengiriman.` }],
       }))
       const memories = text ? ctx.memory.search(owner, text, 5) : []
       if (memories.length) {
@@ -459,6 +513,13 @@ export function apply(ctx: Context) {
         .map((block: any) => block.text)
         .join('')
         .trim()
+      if (screenshotPath) {
+        const image = await readScreenshot(screenshotPath, rootDir)
+        ctx.control.assertCurrent(admission)
+        try { await sendWA(jid, { image, caption: 'Ini screenshot layarnya.' }, { quoted: msg }) }
+        catch { throw new Error('SCREENSHOT_SEND_FAILED') }
+        return
+      }
       if (!response) throw new Error('Model selesai tanpa menghasilkan balasan teks')
 
       const bubbles = splitIntoBubbles(response)
@@ -553,20 +614,59 @@ export function apply(ctx: Context) {
       }
     })
     socket.ev.on('messages.upsert', (upsert: any) => {
-      if (upsert.type !== 'notify') return
+      if (!Array.isArray(upsert.messages) || upsert.messages.length === 0) return
+      if (upsert.type !== 'notify') { noteIngress('non_notify_event'); return }
       for (const msg of upsert.messages) {
         const jid = msg.key?.remoteJid
         const messageId = msg.key?.id
-        if (!msg.message || msg.key?.fromMe || !jid || !messageId || jid.endsWith('@g.us')) continue
+        if (!msg.message || !jid || !messageId) { noteIngress('incomplete_message'); continue }
+        if (msg.key?.fromMe) { noteIngress('own_account_message'); continue }
+        if (jid.endsWith('@g.us')) { noteIngress('group_message'); continue }
         const principal = ctx.access.principalForAlias('whatsapp', jid)
-        if (!principal) continue
+        if (!principal) {
+          noteIngress(jid.endsWith('@lid') ? 'unconfigured_lid_alias' : 'unconfigured_sender_alias')
+          continue
+        }
         if (seenMessageIds.has(messageId)) continue
         seenMessageIds.add(messageId)
+        noteIngress('trusted_sender_admitted')
         if (seenMessageIds.size > 2000) seenMessageIds.delete(seenMessageIds.values().next().value!)
-        const approvalCommand = messageText(msg.message, extractMessageContent).match(/^\.(approve|reject)\s+(\S+)$/i)
+        const reactionAnswer = approvalReactionAnswer(msg.message, extractMessageContent)
+        if (reactionAnswer) {
+          const target = approvalMessages.get(reactionAnswer.messageId)
+          if (!target) continue
+          const accepted = target.jid === jid && target.principalId === principal.id
+            && ctx.access.answerApproval(target.approvalId, principal.id, 'whatsapp', reactionAnswer.allow)
+          if (accepted) clearApprovalMessage(target.approvalId)
+          void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
+          continue
+        }
+        const quotedAnswer = approvalQuotedAnswer(msg.message, extractMessageContent)
+        if (quotedAnswer) {
+          const target = approvalMessages.get(quotedAnswer.messageId)
+          const accepted = !!target && target.jid === jid && target.principalId === principal.id
+            && ctx.access.answerApproval(target.approvalId, principal.id, 'whatsapp', quotedAnswer.allow)
+          if (accepted) clearApprovalMessage(target.approvalId)
+          void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
+          continue
+        }
+        const buttonAnswer = approvalButtonAnswer(msg.message, extractMessageContent)
+        if (buttonAnswer) {
+          const accepted = ctx.access.answerApproval(buttonAnswer.id, principal.id, 'whatsapp', buttonAnswer.allow)
+          if (accepted) clearApprovalMessage(buttonAnswer.id)
+          void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
+          continue
+        }
+        const approvalText = messageText(msg.message, extractMessageContent).trim()
+        const approvalCommand = approvalText.match(/^\.(approve|reject)\s+(\S+)$/i)
         if (approvalCommand) {
           const accepted = ctx.access.answerApproval(approvalCommand[2], principal.id, 'whatsapp', approvalCommand[1].toLowerCase() === 'approve')
+          if (accepted) clearApprovalMessage(approvalCommand[2])
           void sendWA(jid, { text: accepted ? 'Jawaban persetujuan diterima.' : 'Persetujuan tidak tersedia atau sudah berakhir.' }).catch(() => undefined)
+          continue
+        }
+        if (/^\.(approve|reject)$/i.test(approvalText)) {
+          void sendWA(jid, { text: 'Balas langsung pesan persetujuannya dengan perintah itu, atau beri reaksi ✅ / ❌ pada pesan tersebut.' }).catch(() => undefined)
           continue
         }
         const message = messageText(msg.message, extractMessageContent).trim()
@@ -608,6 +708,8 @@ export function apply(ctx: Context) {
     await Promise.allSettled([...startupTasks])
     await Promise.allSettled(queues.values())
     for (const handle of agentHandles.values()) await handle.dispose().catch(() => undefined)
+    for (const entry of approvalMessages.values()) clearTimeout(entry.timer)
+    approvalMessages.clear()
     agentHandles.clear()
     socket?.end(undefined)
     socket = undefined

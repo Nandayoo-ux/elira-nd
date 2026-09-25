@@ -222,6 +222,22 @@ function bootstrapCase(mode) {
     path.join(root, 'integrations', 'deepseek-harness', 'upstream.json'),
   )
   if (mode !== 'clone') fs.mkdirSync(path.join(root, '.runtime', 'deepseek-harness'), { recursive: true })
+  if (mode === 'upgrade') {
+    fs.mkdirSync(path.join(root, '.runtime', 'deepseek-harness', 'node_modules'), { recursive: true })
+    fs.mkdirSync(path.join(root, 'profiles', 'local', '.agent-presets', 'elara'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'profiles', 'local', '.agent-presets', 'elara', 'preset.yml'), 'name: Fixture\n')
+    fs.copyFileSync(path.join(repositoryRoot, 'profiles', 'cordis.patch.template.yml'),
+      path.join(root, 'profiles', 'cordis.patch.template.yml'))
+    fs.writeFileSync(path.join(root, 'profiles', 'local', 'cordis.patch.yml'),
+      "- insert:\n    - id: elara-core\n      name: 'fixture-core'\n    - id: custom-entry\n      name: 'fixture-custom'\n")
+    for (const name of ['elara-core', 'elara-access', 'elara-control', 'elara-memory',
+      'windows-tools', 'dashboard-api', 'companion-api']) {
+      fs.mkdirSync(path.join(root, 'plugins'), { recursive: true })
+      fs.writeFileSync(path.join(root, 'plugins', `${name}.ts`), '')
+    }
+    fs.mkdirSync(path.join(root, 'channels', 'whatsapp-baileys'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'channels', 'whatsapp-baileys', 'plugin.ts'), '')
+  }
 
   const pin = JSON.parse(fs.readFileSync(path.join(root, 'integrations', 'deepseek-harness', 'upstream.json'))).commit
   writeCommand(path.join(bin, 'corepack.cmd'), 'exit /b 0')
@@ -236,7 +252,7 @@ function bootstrapCase(mode) {
     'exit /b 0',
   ].join('\r\n'))
 
-  return spawnSync('powershell.exe', [
+  const result = spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.join(scripts, 'bootstrap-local.ps1'),
   ], {
@@ -245,9 +261,29 @@ function bootstrapCase(mode) {
     windowsHide: true,
     env: { ...process.env, ELARA_STUB_MODE: mode, PATH: `${bin}${path.delimiter}${process.env.PATH || ''}` },
   })
+  result.fixtureRoot = root
+  result.stubBin = bin
+  return result
 }
 
 describe('bootstrap native-command failure handling', () => {
+  test('upgrades a legacy local patch with access, control, and the existing ELARA preset', () => {
+    const result = bootstrapCase('upgrade')
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    const patchPath = path.join(result.fixtureRoot, 'profiles', 'local', 'cordis.patch.yml')
+    const upgraded = fs.readFileSync(patchPath, 'utf8')
+    for (const id of ['elara-access', 'elara-control', 'agent-presets', 'custom-entry']) {
+      assert.equal((upgraded.match(new RegExp(`^\\s*- id: ${id}\\r?$`, 'gm')) || []).length, 1, id)
+    }
+    assert.match(upgraded, /\.agent-presets/)
+    const again = spawnSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', path.join(result.fixtureRoot, 'scripts', 'bootstrap-local.ps1'),
+    ], { cwd: result.fixtureRoot, encoding: 'utf8', windowsHide: true,
+      env: { ...process.env, ELARA_STUB_MODE: 'upgrade', PATH: `${result.stubBin}${path.delimiter}${process.env.PATH || ''}` } })
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`)
+    assert.equal(fs.readFileSync(patchPath, 'utf8').trimEnd(), upgraded.trimEnd())
+  })
   test('stops on clone failure', () => {
     const result = bootstrapCase('clone')
     assert.notEqual(result.status, 0)

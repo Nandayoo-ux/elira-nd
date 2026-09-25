@@ -213,6 +213,8 @@ before(async () => {
     'plugins/elara-core.ts', 'plugins/elara-memory.ts', 'plugins/windows-tools.ts',
     'plugins/windows-tools-local.ts', 'plugins/dashboard-api.ts', 'plugins/companion-api.ts',
     'channels/whatsapp-baileys/plugin.ts', 'channels/whatsapp-baileys/emotion.ts',
+    'channels/whatsapp-baileys/approval-buttons.ts',
+    'channels/whatsapp-baileys/outbound-screenshot.ts',
     'channels/whatsapp-baileys/format.ts', 'channels/whatsapp-baileys/message-context.ts',
     'channels/whatsapp-baileys/transcription.ts', 'channels/whatsapp-baileys/typing.ts',
     'tests/fixtures/runtime/fake-provider.ts',
@@ -807,15 +809,11 @@ describe('offline DSH-loader composition', () => {
       })
       assert.equal(approved.status, 200)
       assert.equal(ctx.access.answerApproval(first.id, 'fixture-operator', 'dashboard', true), false)
-      // DSH's own sandbox may ask separately for the same call. It must still
-      // receive an explicit answer through the owning dashboard.
       let settled = false
       void pendingWrite.finally(() => { settled = true })
-      for (let round = 0; round < 3 && !settled; round++) {
-        const next = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0] || settled,
-          'sandbox approval or completion', 3_000)
-        if (next !== true) ctx.access.answerApproval(next.id, 'fixture-operator', 'dashboard', true)
-      }
+      const next = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0] || settled,
+        'approved execution settlement', 3_000)
+      assert.equal(next, true, 'the same tool call must not ask for a second approval')
       const result = await pendingWrite
       assert.equal(result.isError, false, result.error?.message)
       assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic approval fixture\n')
@@ -841,6 +839,67 @@ describe('offline DSH-loader composition', () => {
       } finally {
         defaults.dashboard = originalTarget
       }
+    } finally {
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('a managed session switched to never still asks for ELARA one-time approval', async () => {
+    const handle = await createLocalAgent('fixture-never-policy')
+    const agent = handle.agent
+    const file = path.join(fixtureRoot, 'never-policy-must-not-write.txt')
+    const controller = new AbortController()
+    ctx.approval.setPolicy(agent, 'never')
+    assert.equal(ctx.approval.overrideOf(agent.session), 'never')
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pending = ctx.tools.execute({
+        callId: ToolCallId('fixture-never-policy-write'), name: 'write',
+        arguments: { file_path: file, content: 'synthetic fixture only\n' },
+        agent, signal: controller.signal,
+      })
+      const question = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0],
+        'ELARA approval after never policy')
+      assert.equal(question.toolName, 'write')
+      assert.equal(ctx.approval.overrideOf(agent.session), 'ask')
+      assert.equal(fs.existsSync(file), false)
+      assert.equal(ctx.access.answerApproval(question.id, 'fixture-operator', 'dashboard', false), true)
+      const result = await pending
+      assert.equal(result.isError, true)
+      assert.match(result.error.message, /APPROVAL_REJECTED/)
+      assert.equal(fs.existsSync(file), false)
+    } finally {
+      controller.abort()
+      agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
+      await handle.dispose()
+    }
+  })
+
+  test('one approval covers a harmless shell call and its native sandbox check', async () => {
+    const handle = await createLocalAgent('fixture-shell-one-approval')
+    const agent = handle.agent
+    const controller = new AbortController()
+    const toolName = process.platform === 'win32' ? 'pwsh' : 'bash'
+    const command = process.platform === 'win32' ? 'Write-Output ELARA_APPROVAL_FIXTURE'
+      : 'printf ELARA_APPROVAL_FIXTURE'
+    agent.session.append('turn/start', { turn: 1 })
+    try {
+      const pending = ctx.tools.execute({ callId: ToolCallId('fixture-shell-one-approval'), name: toolName,
+        arguments: { command, description: 'Harmless synthetic approval fixture' },
+        agent, signal: controller.signal })
+      const question = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0],
+        'shell approval')
+      assert.equal(question.toolName, toolName)
+      assert.equal(ctx.access.answerApproval(question.id, 'fixture-operator', 'dashboard', true), true)
+      let settled = false
+      void pending.finally(() => { settled = true })
+      const next = await waitFor(() => ctx.access.pendingApprovals('fixture-operator', 'dashboard')[0] || settled,
+        'shell completion without duplicate approval', 5_000)
+      assert.equal(next, true, 'the sandbox must reuse the answer for this exact shell call')
+      const result = await pending
+      assert.equal(result.isError, false, result.error?.message)
     } finally {
       controller.abort()
       agent.session.append('turn/end', { turn: 1, reason: { kind: 'stop' } })
@@ -941,28 +1000,90 @@ describe('offline DSH-loader composition', () => {
         arguments: { file_path: file, content: 'synthetic WhatsApp grant\n' },
         agent, signal: controller.signal })
       const question = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0], 'WhatsApp approval')
-      await waitFor(() => sent.find(item => item.remoteJid === jid && item.text.includes(question.id)), 'approval message')
-      emitMessage('user-a@s.whatsapp.net', 'fixture-wrong-owner-approval', `.approve ${question.id}`)
+      const firstPreview = await waitFor(() => sent.slice(sentBefore).find(item => item.remoteJid === jid
+        && item.text?.includes('Persetujuan ELARA')), 'approval message')
+      assert.doesNotMatch(firstPreview.text, new RegExp(question.id))
+      const card = await waitFor(() => sent.find(item => item.remoteJid === jid
+        && item.approvalButtons?.[0]?.id.includes(question.id)), 'approval buttons')
+      assert.deepEqual(card.approvalButtons.map(item => item.text), ['Izinkan sekali', 'Tolak'])
+      const buttonReply = { interactiveResponseMessage: { nativeFlowResponseMessage: {
+        name: 'quick_reply', paramsJson: JSON.stringify({ id: card.approvalButtons[0].id }),
+      } } }
+      emitStructuredMessage('user-a@s.whatsapp.net', 'fixture-wrong-owner-approval', buttonReply)
       await waitFor(() => sent.find(item => item.remoteJid === 'user-a@s.whatsapp.net'
         && item.text?.includes('tidak tersedia')), 'wrong-owner rejection')
       assert.equal(ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0]?.id, question.id)
-      emitMessage(jid, 'fixture-whatsapp-approval-reply', `.approve ${question.id}`)
+      emitStructuredMessage(jid, 'fixture-whatsapp-approval-reply', buttonReply)
       let settled = false
       void pending.finally(() => { settled = true })
-      for (let round = 0; round < 3 && !settled; round++) {
-        const next = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0] || settled,
-          'sandbox approval or completion', 3_000)
-        if (next !== true) emitMessage(jid, `fixture-whatsapp-sandbox-${round}`, `.approve ${next.id}`)
-      }
+      const next = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0] || settled,
+        'approved WhatsApp execution settlement', 3_000)
+      assert.equal(next, true, 'the same tool call must not ask for a second WhatsApp approval')
       const result = await pending
       assert.equal(result.isError, false, result.error?.message)
       assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic WhatsApp grant\n')
       assert.equal(ctx.access.answerApproval(question.id, 'fixture-user-c', 'whatsapp', true), false)
+      emitStructuredMessage(jid, 'fixture-whatsapp-approval-replay', buttonReply)
+      await waitFor(() => sent.find(item => item.remoteJid === jid && item.text?.includes('sudah berakhir')),
+        'replayed button rejection')
+
+      const quotedFile = path.join(fixtureRoot, 'quoted-approval-write.txt')
+      const quotedStart = sent.length
+      const quotedCall = ctx.tools.execute({ callId: ToolCallId('fixture-whatsapp-quoted-allow'), name: 'write',
+        arguments: { file_path: quotedFile, content: 'quoted approval fixture\n' }, agent, signal: controller.signal })
+      const quotedQuestion = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0],
+        'quoted approval')
+      const quotedPreview = await waitFor(() => sent.slice(quotedStart).find(item => item.remoteJid === jid
+        && item.text?.includes('Persetujuan ELARA')), 'quoted approval preview')
+      assert.doesNotMatch(quotedPreview.text, new RegExp(quotedQuestion.id))
+      const quotedReply = { extendedTextMessage: { text: '.approve',
+        contextInfo: { stanzaId: quotedPreview.messageId } } }
+      emitStructuredMessage('user-a@s.whatsapp.net', 'fixture-wrong-owner-quoted', quotedReply)
+      assert.equal(ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0]?.id, quotedQuestion.id)
+      emitStructuredMessage(jid, 'fixture-whatsapp-quoted-allow', quotedReply)
+      const quotedResult = await quotedCall
+      assert.equal(quotedResult.isError, false, quotedResult.error?.message)
+      assert.equal(fs.readFileSync(quotedFile, 'utf8'), 'quoted approval fixture\n')
+      assert.equal(ctx.access.answerApproval(quotedQuestion.id, 'fixture-user-c', 'whatsapp', true), false)
+
+      const rejectedFile = path.join(fixtureRoot, 'reaction-must-not-write.txt')
+      const rejectedCall = ctx.tools.execute({ callId: ToolCallId('fixture-whatsapp-reaction-reject'), name: 'write',
+        arguments: { file_path: rejectedFile, content: 'must not exist' }, agent, signal: controller.signal })
+      const reactionQuestion = await waitFor(() => ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0],
+        'reaction approval')
+      const preview = await waitFor(() => sent.find(item => item.remoteJid === jid
+        && item.text?.includes('reaction-must-not-write.txt')), 'reaction approval preview')
+      const reaction = { reactionMessage: { key: { remoteJid: jid, id: preview.messageId }, text: '❌' } }
+      emitStructuredMessage('user-a@s.whatsapp.net', 'fixture-wrong-owner-reaction', reaction)
+      assert.equal(ctx.access.pendingApprovals('fixture-user-c', 'whatsapp')[0]?.id, reactionQuestion.id)
+      emitStructuredMessage(jid, 'fixture-whatsapp-reaction-reject', reaction)
+      const rejectedResult = await rejectedCall
+      assert.equal(rejectedResult.isError, true)
+      assert.equal(fs.existsSync(rejectedFile), false)
     } finally {
       defaults.whatsapp = previousTarget
       controller.abort()
       agent.session.append('turn/end', { turn: 2, reason: { kind: 'stop' } })
     }
+  })
+
+  test('a fresh session screenshot is delivered as a WhatsApp image, with an honest missing-file result', async () => {
+    const jid = 'user-c@s.whatsapp.net'
+    const sentBefore = sent.length
+    emitMessage(jid, 'fixture-screenshot-send', 'fixture screenshot layar')
+    const image = await waitFor(() => sent.slice(sentBefore).find(item => item.remoteJid === jid
+      && Buffer.isBuffer(item.image)), 'WhatsApp screenshot image')
+    assert.equal(image.caption, 'Ini screenshot layarnya.')
+    assert.deepEqual([...image.image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10])
+    assert.equal(sent.slice(sentBefore).some(item => item.remoteJid === jid
+      && item.text?.includes('fixture:fixture screenshot layar')), false)
+
+    const missingStart = sent.length
+    emitMessage(jid, 'fixture-screenshot-missing', 'fixture screenshot layar tanpa file')
+    const failure = await waitFor(() => sent.slice(missingStart).find(item => item.remoteJid === jid
+      && item.text?.includes('belum berhasil kukirim')), 'missing screenshot response')
+    assert.equal(failure.image, undefined)
+    assert.equal(sent.slice(missingStart).some(item => item.remoteJid === jid && item.image), false)
   })
 
   test('trusted WhatsApp ingress preserves quoted context and adaptive typing lifecycle', async () => {

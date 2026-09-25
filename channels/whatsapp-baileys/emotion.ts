@@ -89,7 +89,7 @@ export function assessEmotion(text: string, configuredMode: EmotionMode = 'auto'
   const normalized = text.trim()
   const matched = patterns.find(candidate => candidate.pattern.test(normalized))
   const category = matched?.category ?? 'neutral'
-  let detectedLevel = matched?.baseLevel ?? 2
+  let detectedLevel = matched?.baseLevel ?? 3
 
   const casing = uppercaseRatio(normalized)
   if (casing.letters >= 6 && casing.ratio >= 0.55) detectedLevel += 1

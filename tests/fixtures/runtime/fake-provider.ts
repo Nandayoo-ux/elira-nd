@@ -1,4 +1,5 @@
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 export const name = 'elara-runtime-fixture-provider'
 export const inject = ['llm']
@@ -56,6 +57,15 @@ class FixtureAdapter {
         if (signal?.aborted) done()
       })
       if (signal?.aborted) return
+    }
+    if (text === 'fixture screenshot layar') {
+      const instruction = options.messages.flatMap(message => message.content
+        .filter(part => part.type === 'text').map(part => part.text))
+        .find(value => value.includes('Adaptor WhatsApp hanya akan mengirim berkas itu'))
+      const target = /path ini: (.+?\.png)\. Adaptor WhatsApp/u.exec(instruction || '')?.[1]
+      if (!target) throw new Error('Synthetic screenshot destination is missing')
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII=', 'base64'))
     }
     const logPath = process.env.ELARA_RUNTIME_REQUEST_LOG
     if (logPath) {

@@ -20,12 +20,13 @@ function assertPatchShape(contents) {
   assert.match(contents, /^- id: web-search-deepseek$/m)
   assert.match(contents, /^- id: agent-presets$/m)
   assert.match(contents, /^\s+default: elara$/m)
-  assert.match(contents, /^\s+- path: '__ELARA_PRESET_ROOT__'$/m)
+  assert.match(contents, /^\s+- path: '[^']+'$/m)
   assert.match(contents, /^\s+apiKeyEnv: 'ROUTER9_API_KEY'$/m)
 }
 
 test('portable Cordis template keeps custom inserts and direct overrides separate', () => {
   assertPatchShape(template)
+  assert.match(template, /^\s+- path: '__ELARA_PRESET_ROOT__'$/m)
   for (const [id, placeholder] of plugins) {
     assert.equal((template.match(new RegExp(`^    - id: ${id}$`, 'gm')) || []).length, 1)
     assert.equal((template.match(new RegExp(`^- id: ${id}$`, 'gm')) || []).length, 0)

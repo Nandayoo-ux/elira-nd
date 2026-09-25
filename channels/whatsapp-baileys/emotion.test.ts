@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { assessEmotion, emotionStyleContext, parseEmotionMode } from './emotion.ts'
 
 describe('WhatsApp emotion levels', () => {
-  test('uses natural level for a neutral message', () => {
+  test('uses expressive level for an ordinary casual message', () => {
     assert.deepEqual(assessEmotion('lagi ngapain', 'auto'), {
-      category: 'neutral', configuredMode: 'auto', detectedLevel: 2, effectiveLevel: 2, safetyLimited: false,
+      category: 'neutral', configuredMode: 'auto', detectedLevel: 3, effectiveLevel: 3, safetyLimited: false,
     })
   })
 
@@ -17,7 +17,7 @@ describe('WhatsApp emotion levels', () => {
 
   test('honors a manual level for ordinary conversation', () => {
     const result = assessEmotion('coba lihat ini', 4)
-    assert.equal(result.detectedLevel, 2)
+    assert.equal(result.detectedLevel, 3)
     assert.equal(result.effectiveLevel, 4)
     assert.equal(result.safetyLimited, false)
   })

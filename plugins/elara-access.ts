@@ -97,6 +97,7 @@ export function apply(ctx: Context) {
     catch { auditDegraded = true; console.error('[ELARA-AUDIT] durable write failed') }
   })
   const grants = new Map<ToolExecution['token'], string>()
+  const approvedScopes = new Map<ToolExecution['token'], string>()
   const ownRequests = new WeakMap<ApprovalRequest, { exec: Readonly<ToolExecution>, accepted: boolean }>()
   const liveExecutions = new Map<ToolExecution['token'], Readonly<ToolExecution>>()
   const trackedExecutions = new Map<ToolExecution['token'], Readonly<ToolExecution>>()
@@ -232,6 +233,11 @@ export function apply(ctx: Context) {
     const scope = approvalScope(exec)
     const binding = bindingForAgent(exec.agent)
     if (!scope || !binding) return 'unavailable'
+    if (!owned && liveExecutions.get(exec.token) === exec && approvedScopes.get(exec.token) === scope) {
+      // DSH's sandbox is asking about the same execution after ELARA's one-time
+      // approval. Reuse that exact frozen scope; do not create a second grant.
+      return 'allowed-once'
+    }
     const details = JSON.stringify({ cwd: exec.agent?.session.header.cwd, arguments: exec.arguments,
       reason: request.reason }, null, 2)
     // Never ask for an action whose full preview cannot be delivered.
@@ -364,7 +370,11 @@ export function apply(ctx: Context) {
         }
       }
       for (const [token, exec] of liveExecutions) {
-        if (exec.agent && scope.has(String(exec.agent.id))) { grants.delete(token); liveExecutions.delete(token) }
+        if (exec.agent && scope.has(String(exec.agent.id))) {
+          grants.delete(token)
+          approvedScopes.delete(token)
+          liveExecutions.delete(token)
+        }
       }
     },
     recordAudit(record) {
@@ -409,19 +419,28 @@ export function apply(ctx: Context) {
         callId: exec.callId, reason: 'ELARA sensitive operation requires one-time approval', signal: exec.signal }
       const owned = { exec, accepted: false }
       ownRequests.set(request, owned)
+      let refusalReason = denialText(decision)
       try {
+        // DSH's danger-full-access preset persists approval/policy=never in the
+        // session. ELARA still requires a one-time question for this tool, so
+        // restore ask on the owned session before using DSH's approval seam.
+        ctx.approval.setPolicy(exec.agent, 'ask')
         const outcome = await ctx.approval.request(request)
         if (outcome === 'allowed-once' && owned.accepted && approvalScope(exec) === scope) {
           grants.set(exec.token, scope)
+          approvedScopes.set(exec.token, scope)
           liveExecutions.set(exec.token, exec)
           return await next()
         }
+        refusalReason = `ELARA access denied (APPROVAL_${outcome === 'rejected' ? 'REJECTED'
+          : outcome === 'cancelled' ? 'CANCELLED' : 'UNAVAILABLE'})`
       } catch {
         // Missing active turn or failed audit cannot issue a grant.
+        refusalReason = 'ELARA access denied (APPROVAL_UNAVAILABLE)'
       } finally {
         ownRequests.delete(request)
       }
-      return { kind: 'deny' as const, reason: denialText(decision) }
+      return { kind: 'deny' as const, reason: refusalReason }
     }
     return { kind: 'deny' as const, reason: denialText(decision) }
   })
@@ -472,6 +491,7 @@ export function apply(ctx: Context) {
   })
   ctx.on('tools/result', (exec, result) => {
     const entry = executionAudit.get(exec.token)
+    approvedScopes.delete(exec.token)
     executionAudit.delete(exec.token)
     correlation.delete(exec.token)
     trackedExecutions.delete(exec.token)

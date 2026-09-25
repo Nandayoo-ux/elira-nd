@@ -20,7 +20,7 @@
       "role": "user",
       "enabled": true,
       "channelAliases": {
-        "whatsapp": ["62882007767137@s.whatsapp.net", "628132661159@s.whatsapp.net", "198454030684321@lid"]
+        "whatsapp": ["62882007767137@s.whatsapp.net", "628132661159@s.whatsapp.net", "198454030684321@lid", "192161383485490@lid"]
       },
       "allowedDeviceIds": ["local-windows"]
     }
